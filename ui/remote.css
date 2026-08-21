@@ -8,9 +8,13 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* Fill the shell's content box. The stage is the point of this module —
-     everything else is a strip around it. */
-  min-height: calc(100dvh - 210px);
+  /* HEIGHT, not min-height. With min-height the stage grew past the viewport
+     (measured 1088px tall inside a 900px window), so the fit calculation was
+     correct but centred the frame inside a box taller than the screen — huge
+     black bands above and below, and the page scrolled. Bounding it to the
+     viewport is what makes "Fit" actually mean fit. */
+  height: calc(100dvh - 200px);
+  max-height: calc(100dvh - 200px);
 }
 
 /* ---------- status + controls bar ---------- */
@@ -89,7 +93,10 @@
 .rd-stage {
   position: relative;
   flex: 1 1 auto;
-  min-height: 320px;
+  /* min-height: 0 is load-bearing. A flex item defaults to min-height:auto,
+     which refuses to shrink below its content — so the stage would push the
+     column past its own height instead of fitting inside it. */
+  min-height: 0;
   overflow: hidden;
   background: var(--bg-0);
   border: 1px solid var(--line-2);
@@ -138,20 +145,21 @@
 }
 @keyframes rd-scan { 0% { top: 0; } 100% { top: 100%; } }
 
-/* ---------- on-screen keys ---------- */
-.rd-keys { display: none; }
-.rd-keys.is-open {
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 10px;
+/* ---------- footer ---------- */
+.rd-foot {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 6px 14px;
   background: var(--panel);
   border: 1px solid var(--line-2);
 }
-.rd-keyrow { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.rd-mod-hint { margin-left: auto; }
+.rd-foot .rd-hint { margin-left: auto; }
+@media (max-width: 700px) { .rd-foot .rd-hint { display: none; } }
 
 /* ---------- mobile ---------- */
 @media (max-width: 860px) {
-  .rd { min-height: calc(100dvh - 190px); }
+  /* Same bound as desktop, adjusted for the bottom tab bar the shell adds
+     below 860px. min-height here would reintroduce the overflow. */
+  .rd { height: calc(100dvh - 250px); max-height: calc(100dvh - 250px); }
   .rd-bar { padding: 8px 10px; gap: var(--s-2); }
   .rd-controls { margin-left: 0; width: 100%; }
   .rd-group { flex: 1 1 auto; }
@@ -159,5 +167,5 @@
   .rd-devices { width: 100%; }
   .rd-device { flex: 1 1 140px; }
   .rd-device-why { display: none; }   /* the dot and strike-through carry it */
-  .rd-stage { min-height: 46vh; }
+  .rd-stage { min-height: 0; }
 }

@@ -1,121 +1,69 @@
 /* ============================================================
    ojee-remote — module UI.
 
-   Mounts in ojee-console or in ojee-ui's standalone shell; the
-   only difference is ctx.base, which ctx.api()/ctx.sse() already
-   handle. Nothing below knows which it is.
+   Two transports behind one screen, because the two operating
+   systems genuinely differ and pretending otherwise would mean
+   lying to the user about what they can see:
 
-   Three behaviours are the whole point of this rewrite:
+     agent   Linux. A host agent captures ANY monitor through the
+             desktop portal and streams H.264, decoded here with
+             WebCodecs. Switching re-points the encoder; the
+             machine's PRIMARY display is never touched.
 
-   1. FREEZE AND SWAP. Switching monitors rebuilds the RDP session
-      on the far side. Instead of blanking and hoping, we snapshot
-      the live canvas to an overlay, ask the server to switch (it
-      does not answer until the compositor confirms), build the new
-      connection in a DETACHED element, and cross-fade only when
-      that connection produces a real frame. The user sees a dimmed
-      still and a label, never black.
+     rdp     Windows. guacd streams every monitor in one session
+             (multimon), so switching is a client-side crop with
+             no round trip at all.
 
-   2. ONE RECONNECT CONTROLLER. The old client scheduled reconnects
-      from four places, so a single drop could start several
-      overlapping attempts that killed each other. Here exactly one
-      is ever in flight, with capped backoff, and it gives up
-      loudly after five tries instead of retrying forever behind a
-      spinner that looks identical to a hang.
+   Design points that are not obvious:
 
-   3. HONEST STATES. "device offline", "switching monitor",
-      "reconnecting (3/5)" and "session ended" are different
-      situations with different responses. They used to all render
-      as the same red word.
+   * The decoder is fed only after a KEYFRAME. H.264 is a delta
+     format; starting on a P-frame produces a smear of garbage or
+     a decoder error, and both look like "the remote desktop is
+     broken" rather than "we joined mid-stream".
+
+   * Switching monitors keeps the LAST FRAME on screen until the
+     new one arrives, rather than blanking. The previous build
+     blanked and reconnected on a blind timer, which is what the
+     black screens were.
+
+   * One reconnect controller. The previous build scheduled from
+     four places and they stacked.
    ============================================================ */
-
-/**
- * guacamole-common-js is loaded dynamically rather than with a static import.
- * A static specifier would have to name a path, and the correct path differs
- * between mounted (`/remote/guac-js/…`) and standalone (`/guac-js/…`) — so a
- * static import would hardcode one and break the other. Everything else in
- * this file is already base-agnostic via ctx.api/ctx.sse; this keeps the last
- * piece that way too.
- */
-let Guacamole = null;
-
-/* ── state ────────────────────────────────────────────────────────────── */
 
 let ctx = null;
 let root = null;
 
+/* ── state ────────────────────────────────────────────────────────────── */
+
 let devices = [];
-let active = null;          // the device object we are connected (or connecting) to
-let monitors = [];          // primary-switch devices only
-let mode = 'single';        // 'primary-switch' | 'multimon' | 'single'
+let active = null;
+let monitors = [];
+let activeMonitor = null;
+let mode = 'single';
 
-let client = null;          // live Guacamole.Client
-let tunnel = null;          // its tunnel, so a disconnect can be AWAITED
-let display = null;
-let canvasEl = null;
+let socket = null;            // agent transport
+let decoder = null;
+let canvas = null;
+let gctx = null;
+let waitingKey = true;
 
-let focused = null;         // multimon: which monitor we are cropped to, or null for all
-let fit = 'contain';        // 'contain' | '100'
+let guac = null;              // rdp transport
+let guacEl = null;
 
-// View transform on top of the base fit/crop, driven by pinch and two-finger
-// drag. 1 / 0 / 0 is the untouched base view.
+let focused = null;           // multimon local crop
+let fit = 'contain';
 let zoom = 1, panX = 0, panY = 0;
 const ZOOM_MIN = 1, ZOOM_MAX = 8;
 
-let cursorX = 0, cursorY = 0;   // remote pixels, for the trackpad cursor
-
-/* ── the reconnect controller ─────────────────────────────────────────── */
-
-/**
- * Exactly one reconnect may be pending. Every path that wants to reconnect
- * goes through here, so they cannot stack.
- *
- * Backoff is capped at 15s: uncapped, a machine that has been off for an hour
- * gets hammered the instant it wakes; unbacked-off, a refusing port produces a
- * request storm.
- */
-const reconnect = {
-  timer: null,
-  attempt: 0,
-  max: 5,
-  generation: 0,     // invalidates callbacks from a superseded connection
-
-  schedule(reason) {
-    this.cancel();
-    if (this.attempt >= this.max) {
-      setState('failed', `${active?.name || 'Device'} is not responding`, reason);
-      return;
-    }
-    this.attempt += 1;
-    const wait = Math.min(1000 * 2 ** (this.attempt - 1), 15000);
-    setState('reconnecting', `Reconnecting (${this.attempt}/${this.max})`,
-      `next attempt in ${Math.round(wait / 1000)}s`);
-    this.timer = setTimeout(() => { this.timer = null; connect(); }, wait);
-  },
-
-  cancel() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-  },
-
-  /** A successful connection clears the budget. */
-  succeed() {
-    this.cancel();
-    this.attempt = 0;
-  },
-};
+let frameW = 0, frameH = 0;
+let stats = { fps: 0, kbps: 0, rttMs: null, decoded: 0 };
 
 /* ── status ───────────────────────────────────────────────────────────── */
 
 const STATE_KIND = {
-  connected: 'ok',
-  connecting: 'info',
-  switching: 'info',
-  reconnecting: 'warn',
-  offline: 'warn',
-  failed: 'err',
-  ended: 'warn',
+  connected: 'ok', connecting: 'info', switching: 'info',
+  reconnecting: 'warn', offline: 'warn', failed: 'err', unsupported: 'err',
 };
-
 let state = 'idle';
 
 function setState(next, label, detail = '') {
@@ -125,57 +73,51 @@ function setState(next, label, detail = '') {
   el.dataset.kind = STATE_KIND[next] || '';
   el.querySelector('.rd-state-label').textContent = label;
   el.querySelector('.rd-state-detail').textContent = detail;
-  root.querySelector('#rd-retry').hidden = next !== 'failed' && next !== 'offline';
+  const retry = root.querySelector('#rd-retry');
+  if (retry) retry.hidden = !['failed', 'offline', 'unsupported'].includes(next);
 }
 
-/* ── connection ───────────────────────────────────────────────────────── */
+/* ── reconnect controller ─────────────────────────────────────────────── */
+
+const reconnect = {
+  timer: null, attempt: 0, max: 5, generation: 0,
+
+  schedule(reason) {
+    this.cancel();
+    if (this.attempt >= this.max) {
+      setState('failed', `${active?.name || 'Device'} is not responding`, reason);
+      return;
+    }
+    this.attempt += 1;
+    // Capped: uncapped, a machine that has been off for an hour gets hammered
+    // the instant it wakes.
+    const wait = Math.min(1000 * 2 ** (this.attempt - 1), 15000);
+    setState('reconnecting', `Reconnecting (${this.attempt}/${this.max})`,
+      `${reason} · retrying in ${Math.round(wait / 1000)}s`);
+    this.timer = setTimeout(() => { this.timer = null; connect(); }, wait);
+  },
+
+  cancel() { if (this.timer) clearTimeout(this.timer); this.timer = null; },
+  succeed() { this.cancel(); this.attempt = 0; },
+};
+
+/* ── teardown ─────────────────────────────────────────────────────────── */
 
 function teardown() {
   reconnect.generation += 1;
   reconnect.cancel();
-  try { client?.disconnect(); } catch { /* already gone */ }
-  client = null;
-  tunnel = null;
-  display = null;
-  canvasEl = null;
+  try { socket?.close(); } catch { /* already gone */ }
+  socket = null;
+  try { decoder?.close(); } catch { /* already closed */ }
+  decoder = null;
+  try { guac?.disconnect(); } catch { /* already gone */ }
+  guac = null;
+  guacEl?.remove();
+  guacEl = null;
+  waitingKey = true;
 }
 
-/**
- * Disconnect and wait until the session is really gone.
- *
- * gnome-remote-desktop serves ONE session at a time. Calling disconnect() and
- * immediately reconnecting means the new session races the old one's teardown
- * — guacd accepts it, the keymaps load, and then no frame ever arrives because
- * the far side is still holding the previous session. That is what the freeze
- * overlay was sitting on top of, indefinitely.
- *
- * So: close, and wait for the tunnel to confirm. The timeout is a backstop, not
- * the mechanism — if the socket never reports closed we proceed anyway rather
- * than hanging forever.
- */
-function disconnectAndWait(timeoutMs = 4000) {
-  const c = client;
-  const t = tunnel;
-  client = null;
-  tunnel = null;
-  display = null;
-  if (!c) return Promise.resolve();
-
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-
-    if (t) {
-      const prev = t.onstatechange;
-      t.onstatechange = (state) => {
-        prev?.(state);
-        if (state === Guacamole.Tunnel.State.CLOSED) finish();
-      };
-    }
-    try { c.disconnect(); } catch { finish(); }
-    setTimeout(finish, timeoutMs);
-  });
-}
+/* ── connect ──────────────────────────────────────────────────────────── */
 
 async function connect() {
   if (!active) return;
@@ -184,24 +126,189 @@ async function connect() {
   if (presence?.online === false) {
     teardown();
     setState('offline', `${active.name} is offline`,
-      presence.error ? `last probe: ${presence.error}` : 'nothing is listening on that host');
+      presence.error ? `last probe: ${presence.error}` : 'nothing answered on that host');
     return;
   }
 
+  teardown();
   const gen = ++reconnect.generation;
   setState('connecting', `Connecting to ${active.name}…`);
 
+  if (active.transport === 'agent') return connectAgent(gen);
+  return connectRdp(gen);
+}
+
+/* ── agent transport (Linux, portal capture) ──────────────────────────── */
+
+async function connectAgent(gen) {
+  if (!('VideoDecoder' in window)) {
+    // Safari < 16.4, Firefox without the flag. Say which browser feature is
+    // missing rather than showing a dead black rectangle.
+    setState('unsupported', 'This browser cannot decode the stream',
+      'WebCodecs (VideoDecoder) is required — Safari 16.4+, Chrome 94+');
+    return;
+  }
+
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // Note there is no token here: the gateway proxies this upgrade and attaches
+  // the agent's bearer header itself, so the browser never holds it.
+  const url = `${wsProto}//${location.host}${ctx.base}/stream?device=${encodeURIComponent(active.id)}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  socket = ws;
+
+  let opened = false;
+
+  ws.onopen = () => { opened = true; };
+
+  ws.onclose = (e) => {
+    if (gen !== reconnect.generation) return;
+    if (state === 'switching') return;   // the switch owns its own recovery
+    // 4401/4502 are the gateway's own codes and carry a real reason.
+    const why = e.reason || (opened ? 'stream closed' : 'could not open stream');
+    reconnect.schedule(why);
+  };
+
+  ws.onerror = () => { /* onclose always follows and carries the reason */ };
+
+  ws.onmessage = async (ev) => {
+    if (gen !== reconnect.generation) return;
+
+    if (typeof ev.data === 'string') {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      return handleControl(msg, ws, gen);
+    }
+
+    if (!decoder || decoder.state !== 'configured') return;
+    const buf = new Uint8Array(ev.data);
+    const key = (buf[0] & 0x80) !== 0;
+
+    // H.264 is a delta format. Feeding the decoder a P-frame before any
+    // keyframe yields garbage or an error, both of which read as "broken".
+    if (waitingKey) {
+      if (!key) return;
+      waitingKey = false;
+    }
+
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: key ? 'key' : 'delta',
+        timestamp: performance.now() * 1000,
+        data: buf.subarray(1),
+      }));
+    } catch (e) {
+      // A decoder that has gone bad cannot be recovered in place; ask for a
+      // fresh keyframe and reset it.
+      waitingKey = true;
+      try { decoder.close(); } catch { /* already closed */ }
+      decoder = null;
+      ws.send(JSON.stringify({ t: 'keyframe' }));
+      console.warn('[remote] decoder reset:', e.message);
+    }
+  };
+}
+
+async function handleControl(msg, ws, gen) {
+  if (msg.t === 'ping') {
+    ws.send(JSON.stringify({ t: 'pong', ts: msg.ts }));
+    return;
+  }
+
+  if (msg.t === 'stats') {
+    stats = { fps: msg.fps, kbps: msg.bitrateKbps, rttMs: msg.rttMs, decoded: stats.decoded };
+    paintStats();
+    return;
+  }
+
+  if (msg.t === 'error') {
+    ctx.toast('err', 'Remote error', msg.detail || '');
+    return;
+  }
+
+  if (msg.t === 'ready' || msg.t === 'active') {
+    monitors = msg.monitors || monitors;
+    activeMonitor = msg.active || msg.monitor || activeMonitor;
+    mode = active.monitors;
+    await configureDecoder(msg.codec || 'avc1.42E01E', msg.w, msg.h, gen);
+    reconnect.succeed();
+    setState('connected', active.name, activeMonitor || '');
+    renderControls();
+    clearFreeze();
+  }
+}
+
+async function configureDecoder(codec, w, h, gen) {
+  frameW = w || frameW;
+  frameH = h || frameH;
+
+  try { decoder?.close(); } catch { /* already closed */ }
+  waitingKey = true;
+
+  ensureCanvas();
+  canvas.width = frameW;
+  canvas.height = frameH;
+
+  const config = { codec, codedWidth: frameW, codedHeight: frameH, optimizeForLatency: true };
+  const support = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }));
+  if (gen !== reconnect.generation) return;
+
+  if (!support.supported) {
+    setState('unsupported', 'This browser cannot decode the stream',
+      `${codec} at ${frameW}×${frameH} is not supported here`);
+    return;
+  }
+
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      stats.decoded += 1;
+      // drawImage then close, every frame. A VideoFrame holds a GPU buffer;
+      // failing to close it exhausts the pool within seconds and the stream
+      // stops with no error anywhere obvious.
+      gctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+    },
+    error: (e) => {
+      console.warn('[remote] decoder error:', e.message);
+      waitingKey = true;
+    },
+  });
+  decoder.configure(config);
+  applyTransform();
+}
+
+function ensureCanvas() {
+  const stage = root.querySelector('#rd-stage');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'rd-canvas';
+    gctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  }
+  if (canvas.parentElement !== stage) stage.appendChild(canvas);
+}
+
+/* ── rdp transport (Windows, guacd) ───────────────────────────────────── */
+
+let Guacamole = null;
+
+async function connectRdp(gen) {
+  if (!Guacamole) {
+    // Loaded lazily and from ctx.base: a static specifier would hardcode the
+    // mount point and break standalone.
+    Guacamole = (await import(`${ctx.base}/guac-js/guacamole-common.js`)).default;
+  }
+  if (gen !== reconnect.generation) return;
+
+  const stage = root.querySelector('#rd-stage');
+  const dpr = window.devicePixelRatio || 1;
+
   let token;
   try {
-    const stage = root.querySelector('#rd-stage');
-    const dpr = window.devicePixelRatio || 1;
     const r = await ctx.api(
-      `/devices/${encodeURIComponent(active.id)}/token` +
-      `?width=${Math.round(stage.clientWidth * dpr)}&height=${Math.round(stage.clientHeight * dpr)}`);
+      `/devices/${encodeURIComponent(active.id)}/token`
+      + `?width=${Math.round(stage.clientWidth * dpr)}&height=${Math.round(stage.clientHeight * dpr)}`);
     token = r.token;
-    mode = r.monitors;
   } catch (e) {
-    if (gen !== reconnect.generation) return;
     if (/offline/i.test(e.message)) {
       setState('offline', `${active.name} is offline`, e.message);
       return;
@@ -211,217 +318,48 @@ async function connect() {
   }
   if (gen !== reconnect.generation) return;
 
-  let built;
-  try {
-    built = await buildConnection(token, gen);
-  } catch {
-    // buildConnection already scheduled the retry and set the status. Swallow
-    // here deliberately: connect() must never throw, or a failed connection
-    // escapes mount() and the host replaces this module's UI — including the
-    // device picker and the retry button — with a generic error panel.
-    return;
-  }
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tunnel = new Guacamole.WebSocketTunnel(`${wsProto}//${location.host}${ctx.base}/guac`);
+  const client = new Guacamole.Client(tunnel);
+  const display = client.getDisplay();
+  const el = display.getElement();
 
-  const { client: c, display: d, el, tunnel: tun } = built;
-  if (gen !== reconnect.generation) {
-    try { c.disconnect(); } catch { /* superseded */ }
-    return;
-  }
+  el.style.position = 'absolute';
+  el.style.left = '0';
+  el.style.top = '0';
+  el.style.transformOrigin = '0 0';
 
-  attach(el, c, d, tun);
-  reconnect.succeed();
-  setState('connected', active.name, mode === 'multimon' ? 'all monitors' : '');
-  await loadMonitors();
-  recentre();
-  applyTransform();
-}
+  let dead = false;
+  const onDead = (why) => {
+    if (dead || gen !== reconnect.generation) return;
+    dead = true;
+    if (state === 'switching') return;
+    reconnect.schedule(why);
+  };
 
-/**
- * Build a connection into a DETACHED element and resolve on its first real
- * frame. Nothing is put on screen until there is something to show — which is
- * what lets the caller keep the previous image visible in the meantime.
- */
-function buildConnection(token, gen) {
-  return new Promise((resolve, reject) => {
-    const tun = new Guacamole.WebSocketTunnel(
-      `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${ctx.base}/guac`);
-    const c = new Guacamole.Client(tun);
-    const d = c.getDisplay();
-    const el = d.getElement();
+  client.onstatechange = (s) => {
+    if (s === 3) {
+      reconnect.succeed();
+      frameW = display.getWidth();
+      frameH = display.getHeight();
+      setState('connected', active.name, mode === 'multimon' ? 'all monitors' : '');
+      loadMonitors().then(renderControls);
+      applyTransform();
+      clearFreeze();
+    } else if (s === 5) onDead('session ended');
+  };
+  // DISCONNECTED does not fire for tunnel-level closures, so the tunnel is
+  // watched too — missing that is why a dead session used to freeze forever.
+  tunnel.onstatechange = (s) => { if (s === Guacamole.Tunnel.State.CLOSED) onDead('connection closed'); };
+  client.onerror = (e) => onDead(e.message || `guacd error ${e.code}`);
+  tunnel.onerror = () => onDead('tunnel error');
+  client.onaudio = (stream, mimetype) => Guacamole.AudioPlayer.getInstance(stream, mimetype);
+  display.onresize = () => { frameW = display.getWidth(); frameH = display.getHeight(); applyTransform(); };
 
-    el.style.position = 'absolute';
-    el.style.left = '0';
-    el.style.top = '0';
-    el.style.transformOrigin = '0 0';
-
-    let settled = false;
-    let dead = false;
-
-    // ONE death path. The client's DISCONNECTED state does not fire for
-    // tunnel-level closures (the server closing the socket), so the tunnel is
-    // watched too — missing that is why a dead session used to freeze on its
-    // last frame forever with no reconnect.
-    const onDead = (why) => {
-      if (dead || gen !== reconnect.generation) return;
-      dead = true;
-      if (!settled) { settled = true; reject(new Error(why)); return; }
-      if (state === 'switching') return;   // the switch owns its own recovery
-      reconnect.schedule(why);
-    };
-
-    // First sync with a sized display means a frame has actually arrived.
-    // Resolving on CONNECTED alone would hand back a blank canvas — which is
-    // precisely the black screen we are removing.
-    c.onsync = () => {
-      if (settled || gen !== reconnect.generation) return;
-      if (d.getWidth() > 0 && d.getHeight() > 0) {
-        settled = true;
-        resolve({ client: c, display: d, el, tunnel: tun });
-      }
-    };
-    c.onstatechange = (s) => { if (s === 5) onDead('session ended'); };
-    tun.onstatechange = (s) => { if (s === Guacamole.Tunnel.State.CLOSED) onDead('connection closed'); };
-    c.onerror = (e) => onDead(e.message || `guacd error ${e.code}`);
-    tun.onerror = (e) => onDead(e?.message || 'tunnel error');
-    c.onaudio = (stream, mimetype) => Guacamole.AudioPlayer.getInstance(stream, mimetype);
-    d.onresize = () => applyTransform();
-
-    c.connect(`token=${encodeURIComponent(token)}`);
-
-    // A connection that completes the handshake but never sends a frame must
-    // be abandoned QUICKLY, not waited out.
-    //
-    // gnome-remote-desktop can accept NLA, let guacd load its keymaps and
-    // negotiate audio, and then send no graphics at all — it does this while
-    // recovering from session churn. Every signal the client can see says
-    // "connected", so a long timeout here is indistinguishable from a hang.
-    // Eight seconds is well past a healthy handshake (~1s on a tailnet) and
-    // short enough that the retry lands while the user is still watching.
-    setTimeout(() => {
-      if (settled || gen !== reconnect.generation) return;
-      settled = true;
-      try { c.disconnect(); } catch { /* nothing to close */ }
-      reject(new Error('connected but no frames — retrying'));
-    }, 8000);
-  }).catch((e) => {
-    if (gen === reconnect.generation) reconnect.schedule(e.message);
-    throw e;
-  });
-}
-
-function attach(el, c, d, tun) {
-  const stage = root.querySelector('#rd-stage');
-  const old = canvasEl;
-
+  guac = client;
+  guacEl = el;
   stage.appendChild(el);
-  client = c;
-  tunnel = tun;
-  display = d;
-  canvasEl = el;
-
-  if (old && old !== el) old.remove();
-  clearFreeze();
-}
-
-/* ── freeze and swap ──────────────────────────────────────────────────── */
-
-/**
- * Snapshot what is on screen right now into an overlay.
- *
- * The still is what the user looks at while the far side rebuilds. Without it
- * the canvas is destroyed the moment we disconnect and they get black — the
- * original complaint.
- */
-function freeze(label) {
-  const stage = root.querySelector('#rd-stage');
-  const overlay = root.querySelector('#rd-freeze');
-  const img = overlay.querySelector('img');
-
-  const source = canvasEl?.querySelector('canvas') || canvasEl;
-  if (source?.toDataURL) {
-    try {
-      img.src = source.toDataURL('image/jpeg', 0.7);
-      // Match the still to where the live canvas actually sat, or it jumps.
-      img.style.transform = canvasEl.style.transform;
-      img.style.transformOrigin = '0 0';
-      img.hidden = false;
-    } catch {
-      // A tainted canvas cannot be read. Fall back to a dim panel rather than
-      // failing the switch — a dim panel is still not black.
-      img.hidden = true;
-    }
-  } else {
-    img.hidden = true;
-  }
-
-  overlay.querySelector('.rd-freeze-label').textContent = label;
-  overlay.hidden = false;
-  stage.classList.add('is-frozen');
-}
-
-function clearFreeze() {
-  const overlay = root.querySelector('#rd-freeze');
-  const stage = root.querySelector('#rd-stage');
-  if (!overlay.hidden) {
-    // Cross-fade rather than cut: the still and the new frame are the same
-    // desktop a moment apart, and a hard cut reads as a glitch.
-    overlay.classList.add('is-fading');
-    setTimeout(() => {
-      overlay.hidden = true;
-      overlay.classList.remove('is-fading');
-      overlay.querySelector('img').removeAttribute('src');
-    }, 200);
-  }
-  stage.classList.remove('is-frozen');
-}
-
-/**
- * Switch which monitor is streamed, without ever showing black.
- *
- *   freeze  →  server switches (and confirms)  →  new connection built
- *   detached  →  swap on its first real frame  →  cross-fade
- */
-async function switchMonitor(monitor) {
-  if (!active || monitor.primary) return;
-
-  const previous = state;
-  setState('switching', `Switching to ${monitor.name}…`, 'holding the last frame');
-  freeze(`switching → ${monitor.name}`);
-
-  // Stop the old session's death handler from scheduling a reconnect: we are
-  // deliberately tearing it down and will rebuild it ourselves.
-  reconnect.generation += 1;
-  reconnect.cancel();
-
-  // Close and WAIT. The far side serves one session at a time, so overlapping
-  // the teardown with the next connect gets the new session accepted by guacd
-  // and then starved of frames.
-  await disconnectAndWait();
-
-  let result;
-  try {
-    result = await ctx.api(`/devices/${encodeURIComponent(active.id)}/primary`, {
-      method: 'POST',
-      body: JSON.stringify({ monitor: monitor.name }),
-    });
-  } catch (e) {
-    ctx.toast('err', 'Could not switch monitor', e.message);
-    setState(previous === 'connected' ? 'connecting' : previous, 'Recovering…');
-    // The far side may or may not have switched; reconnecting resyncs us to
-    // whatever is actually true now.
-    reconnect.attempt = 0;
-    await connect();
-    return;
-  }
-
-  // The server only answers once the compositor confirmed, so there is no
-  // guessing left to do.
-  reconnect.attempt = 0;
-  await connect();
-
-  if (result?.waitedMs != null) {
-    ctx.toast('ok', `Now showing ${monitor.name}`, `switch confirmed in ${result.waitedMs}ms`);
-  }
+  client.connect(`token=${encodeURIComponent(token)}`);
 }
 
 /* ── monitors ─────────────────────────────────────────────────────────── */
@@ -434,108 +372,176 @@ async function loadMonitors() {
     mode = r.mode;
     monitors = r.monitors || [];
   } catch (e) {
-    // Not fatal — the stream still works, you just cannot switch. Say so
-    // rather than rendering chips that fail when tapped.
-    if (mode === 'primary-switch') {
-      ctx.toast('warn', 'Monitor switching unavailable', e.message);
-    }
+    if (active.transport === 'agent') ctx.toast('warn', 'Cannot list monitors', e.message);
   }
-  renderControls();
+}
+
+/**
+ * Switch which monitor is shown.
+ *
+ * agent    one message; the far side re-points its encoder. The previous frame
+ *          stays on screen until the new stream produces one.
+ * multimon a local crop — no network at all.
+ */
+async function switchMonitor(name) {
+  if (!active || name === activeMonitor) return;
+
+  if (mode === 'multimon') {
+    focused = monitors.find((m) => m.name === name) || null;
+    activeMonitor = focused ? name : null;
+    resetView();
+    applyTransform();
+    renderControls();
+    return;
+  }
+
+  if (active.transport !== 'agent' || !socket || socket.readyState !== WebSocket.OPEN) {
+    ctx.toast('warn', 'Cannot switch', 'the stream is not connected');
+    return;
+  }
+
+  setState('switching', `Switching to ${name}…`, 'holding the last frame');
+  freeze(`switching → ${name}`);
+  waitingKey = true;      // the new monitor starts with its own keyframe
+  socket.send(JSON.stringify({ t: 'select', monitor: name }));
+}
+
+/* ── freeze overlay ───────────────────────────────────────────────────── */
+
+function freeze(label) {
+  const overlay = root.querySelector('#rd-freeze');
+  const img = overlay.querySelector('img');
+  try {
+    // The canvas already holds the last decoded frame, so this is just a copy
+    // — no extra decode, no request to the far side.
+    if (canvas) { img.src = canvas.toDataURL('image/jpeg', 0.7); img.hidden = false; }
+    else img.hidden = true;
+  } catch { img.hidden = true; }
+  overlay.querySelector('.rd-freeze-label').textContent = label;
+  overlay.hidden = false;
+}
+
+function clearFreeze() {
+  const overlay = root.querySelector('#rd-freeze');
+  if (!overlay || overlay.hidden) return;
+  overlay.classList.add('is-fading');
+  setTimeout(() => {
+    overlay.hidden = true;
+    overlay.classList.remove('is-fading');
+    overlay.querySelector('img').removeAttribute('src');
+  }, 200);
 }
 
 /* ── view transform ───────────────────────────────────────────────────── */
 
-function frameSize() {
-  const w = display?.getWidth?.() || 0;
-  const h = display?.getHeight?.() || 0;
-  return { w: w || 1920, h: h || 1080 };
-}
-
-/** Where the visible content sits inside the frame — the whole thing, or one monitor. */
 function viewportRect() {
-  const f = frameSize();
   if (mode === 'multimon' && focused) {
     return { x: focused.x, y: focused.y, w: focused.w, h: focused.h };
   }
-  return { x: 0, y: 0, w: f.w, h: f.h };
+  return { x: 0, y: 0, w: frameW || 1920, h: frameH || 1080 };
 }
 
 function applyTransform() {
-  if (!canvasEl) return;
+  const el = canvas || guacEl;
+  if (!el) return;
   const stage = root.querySelector('#rd-stage');
   const box = stage.getBoundingClientRect();
   const r = viewportRect();
 
-  const base = fit === 'contain' || focused
+  const base = (fit === 'contain' || focused)
     ? Math.min(box.width / r.w, box.height / r.h)
     : 1;
   const s = base * zoom;
-
   const tx = (box.width - r.w * s) / 2 - r.x * s + panX;
   const ty = (box.height - r.h * s) / 2 - r.y * s + panY;
-
-  canvasEl.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+  el.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+  el.style.transformOrigin = '0 0';
 }
 
-function recentre() {
-  const r = viewportRect();
-  cursorX = Math.round(r.x + r.w / 2);
-  cursorY = Math.round(r.y + r.h / 2);
-  sendPointer(0);
-}
-
-function resetView() {
-  zoom = 1; panX = 0; panY = 0;
-}
+const resetView = () => { zoom = 1; panX = 0; panY = 0; };
 
 /* ── input ────────────────────────────────────────────────────────────── */
 
-const BTN = { left: 0x01, middle: 0x02, right: 0x04 };
-
-function sendPointer(mask) {
-  if (!client) return;
-  client.sendMouseState(new Guacamole.Mouse.State(
-    cursorX, cursorY,
-    !!(mask & 0x01), !!(mask & 0x02), !!(mask & 0x04),
-    !!(mask & 0x08), !!(mask & 0x10),
-  ));
+/** Screen coords → a fraction of the monitor currently shown. */
+function toFraction(clientX, clientY) {
+  const stage = root.querySelector('#rd-stage');
+  const box = stage.getBoundingClientRect();
+  const r = viewportRect();
+  const base = (fit === 'contain' || focused)
+    ? Math.min(box.width / r.w, box.height / r.h)
+    : 1;
+  const s = base * zoom;
+  const tx = (box.width - r.w * s) / 2 - r.x * s + panX;
+  const ty = (box.height - r.h * s) / 2 - r.y * s + panY;
+  return {
+    fx: Math.max(0, Math.min(1, ((clientX - box.left - tx) / s - r.x) / r.w)),
+    fy: Math.max(0, Math.min(1, ((clientY - box.top - ty) / s - r.y) / r.h)),
+    px: (clientX - box.left - tx) / s,
+    py: (clientY - box.top - ty) / s,
+  };
 }
 
-function clickAt(button) {
-  sendPointer(BTN[button]);
-  setTimeout(() => sendPointer(0), 60);
-}
-
-const MOD_KEYSYM = { Control: 0xffe3, Alt: 0xffe9, Shift: 0xffe1, Meta: 0xffeb };
-const SPECIAL = {
-  Escape: 0xff1b, Tab: 0xff09, Enter: 0xff0d, Backspace: 0xff08, Delete: 0xffff,
-  ArrowUp: 0xff52, ArrowDown: 0xff54, ArrowLeft: 0xff51, ArrowRight: 0xff53,
-  Home: 0xff50, End: 0xff57, PageUp: 0xff55, PageDown: 0xff56,
-  F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1, F5: 0xffc2, F6: 0xffc3,
-  F7: 0xffc4, F8: 0xffc5, F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
+const send = (msg) => {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
 };
 
-// off → armed (applies to the next key only) → locked (until tapped off).
-// Sticky modifiers are the only way to type Ctrl+C on a touchscreen.
-const mods = new Map(Object.keys(MOD_KEYSYM).map((m) => [m, 'off']));
+const BTN = ['left', 'middle', 'right'];
 
-function pressKey(keysym) {
-  if (!client) return;
-  const held = [...mods].filter(([, v]) => v !== 'off').map(([m]) => MOD_KEYSYM[m]);
-  for (const k of held) client.sendKeyEvent(1, k);
-  client.sendKeyEvent(1, keysym);
-  client.sendKeyEvent(0, keysym);
-  for (const k of held.reverse()) client.sendKeyEvent(0, k);
-  // Armed modifiers fire once and clear; locked ones stay.
-  for (const [m, v] of mods) if (v === 'armed') mods.set(m, 'off');
-  renderControls();
+function pointerAt(clientX, clientY, buttons = 0) {
+  const p = toFraction(clientX, clientY);
+  if (active?.transport === 'agent') {
+    send({ t: 'pointer', x: p.fx, y: p.fy });
+  } else if (guac) {
+    guac.sendMouseState(new Guacamole.Mouse.State(
+      Math.round(p.px), Math.round(p.py),
+      !!(buttons & 1), !!(buttons & 4), !!(buttons & 2), false, false));
+  }
 }
 
-function sendCtrlAltDel() {
-  if (!client) return;
-  for (const [ks, down] of [[0xffe3, 1], [0xffe9, 1], [0xffff, 1], [0xffff, 0], [0xffe9, 0], [0xffe3, 0]]) {
-    client.sendKeyEvent(down, ks);
+function buttonAt(clientX, clientY, button, down) {
+  pointerAt(clientX, clientY, down ? (button === 2 ? 2 : button === 1 ? 4 : 1) : 0);
+  if (active?.transport === 'agent') {
+    send({ t: 'button', b: BTN[button] || 'left', down });
   }
+}
+
+/* ── keyboard ─────────────────────────────────────────────────────────── */
+
+// Browser KeyboardEvent.code → Linux input-event-codes. The agent injects at
+// the uinput layer, which speaks keycodes, not keysyms and not JS key names.
+const LINUX_KEY = {
+  Escape: 1, Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7,
+  Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11, Minus: 12, Equal: 13, Backspace: 14,
+  Tab: 15, KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22,
+  KeyI: 23, KeyO: 24, KeyP: 25, BracketLeft: 26, BracketRight: 27, Enter: 28,
+  ControlLeft: 29, KeyA: 30, KeyS: 31, KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35,
+  KeyJ: 36, KeyK: 37, KeyL: 38, Semicolon: 39, Quote: 40, Backquote: 41,
+  ShiftLeft: 42, Backslash: 43, KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48,
+  KeyN: 49, KeyM: 50, Comma: 51, Period: 52, Slash: 53, ShiftRight: 54,
+  AltLeft: 56, Space: 57, CapsLock: 58,
+  F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64, F7: 65, F8: 66, F9: 67, F10: 68,
+  F11: 87, F12: 88,
+  Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106,
+  End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111,
+  ControlRight: 97, AltRight: 100, MetaLeft: 125, MetaRight: 126,
+};
+
+function onKeyDown(e) {
+  if (state !== 'connected' || !active) return;
+  // Let the browser keep its own clipboard shortcuts.
+  if ((e.metaKey || e.ctrlKey) && ['c', 'v', 'x'].includes(e.key.toLowerCase())) return;
+  const code = LINUX_KEY[e.code];
+  if (code == null) return;
+  e.preventDefault();
+  send({ t: 'key', code, down: true });
+}
+
+function onKeyUp(e) {
+  if (state !== 'connected' || !active) return;
+  const code = LINUX_KEY[e.code];
+  if (code == null) return;
+  e.preventDefault();
+  send({ t: 'key', code, down: false });
 }
 
 /* ── rendering ────────────────────────────────────────────────────────── */
@@ -551,30 +557,36 @@ function shell() {
       </div>
       <div class="rd-controls" id="rd-controls"></div>
     </div>
-
-    <div class="rd-stage" id="rd-stage" tabindex="-1">
+    <div class="rd-stage" id="rd-stage" tabindex="0">
       <div class="rd-freeze" id="rd-freeze" hidden>
-        <img alt="">
-        <span class="rd-freeze-label meta"></span>
+        <img alt=""><span class="rd-freeze-label meta"></span>
       </div>
     </div>
-
-    <div class="rd-keys" id="rd-keys"></div>
+    <div class="rd-foot">
+      <span class="meta" id="rd-stats"></span>
+      <span class="meta rd-hint">click to focus · type to send keys</span>
+    </div>
   </div>`;
 }
 
-/**
- * The device picker is the module's primary navigation, not a chip group that
- * hides itself below two entries. With a dual-boot machine, "which of these is
- * actually up" is the first question every single time.
- */
+function paintStats() {
+  const el = root?.querySelector('#rd-stats');
+  if (!el) return;
+  if (state !== 'connected') { el.textContent = ''; return; }
+  const bits = [];
+  if (frameW) bits.push(`${frameW}×${frameH}`);
+  if (stats.fps) bits.push(`${stats.fps} fps`);
+  if (stats.kbps) bits.push(`${stats.kbps} kbps`);
+  if (stats.rttMs != null) bits.push(`${stats.rttMs} ms`);
+  el.textContent = bits.join(" · ");
+}
+
 function renderDevices() {
   const box = root.querySelector('#rd-devices');
   if (!box) return;
   box.innerHTML = devices.map((d) => {
     const dot = d.online === true ? 'dot--ok' : d.online === false ? '' : 'dot--warn';
-    const why = d.online === false
-      ? (d.error ? `offline — ${d.error}` : 'offline')
+    const why = d.online === false ? (d.error ? `offline — ${d.error}` : 'offline')
       : d.online === null ? 'checking…' : `online · ${d.latencyMs}ms`;
     return `
       <button class="rd-device${active?.id === d.id ? ' on' : ''}"
@@ -585,10 +597,9 @@ function renderDevices() {
         <span class="rd-device-why meta">${ctx.esc(why)}</span>
       </button>`;
   }).join('');
-
   box.querySelectorAll('[data-device]').forEach((b) => {
-    // An offline device is still clickable: selecting it shows WHY it is
-    // unreachable, which is more useful than a control that does nothing.
+    // An offline device stays clickable: selecting it explains WHY, which
+    // beats a control that silently does nothing.
     b.addEventListener('click', () => selectDevice(b.dataset.device));
   });
 }
@@ -597,262 +608,131 @@ function renderControls() {
   const box = root.querySelector('#rd-controls');
   if (!box) return;
 
-  const monitorChips = () => {
-    if (mode === 'primary-switch' && monitors.length > 1) {
-      return `
-        <div class="rd-group">
-          <span class="label">Screen</span>
-          <div class="segctl">
-            ${monitors.map((m, i) => `
-              <button data-monitor="${ctx.esc(m.name)}" aria-pressed="${m.primary}"
-                      title="${ctx.esc(m.name)} · ${m.w}×${m.h}${m.primary ? ' · streaming' : ''}">
-                ${i + 1}${m.primary ? '' : ''}
-              </button>`).join('')}
-          </div>
-        </div>`;
-    }
-    if (mode === 'multimon' && monitors.length > 1) {
-      // Local crop — instant, no reconnect, because the stream already
-      // contains every screen.
-      return `
-        <div class="rd-group">
-          <span class="label">Screen</span>
-          <div class="segctl">
-            <button data-focus="" aria-pressed="${!focused}">All</button>
-            ${monitors.map((m, i) => `
-              <button data-focus="${ctx.esc(m.name)}" aria-pressed="${focused?.name === m.name}">${i + 1}</button>`).join('')}
-          </div>
-        </div>`;
-    }
-    return '';
-  };
+  const chips = monitors.length > 1 ? `
+    <div class="rd-group">
+      <span class="label">Screen</span>
+      <div class="segctl">
+        ${mode === 'multimon' ? `<button data-monitor="" aria-pressed="${!focused}">All</button>` : ''}
+        ${monitors.map((m, i) => `
+          <button data-monitor="${ctx.esc(m.name)}"
+                  aria-pressed="${(mode === 'multimon' ? focused?.name : activeMonitor) === m.name}"
+                  title="${ctx.esc(m.name)} · ${m.w}×${m.h}">${i + 1}</button>`).join('')}
+      </div>
+    </div>` : '';
 
   box.innerHTML = `
     <div class="rd-group rd-group--devices">
       <span class="label">Device</span>
       <div class="rd-devices" id="rd-devices"></div>
     </div>
-    ${monitorChips()}
+    ${chips}
     <div class="rd-group">
       <span class="label">Fit</span>
       <div class="segctl">
         <button data-fit="contain" aria-pressed="${fit === 'contain'}">Fit</button>
         <button data-fit="100" aria-pressed="${fit === '100'}">1:1</button>
       </div>
-    </div>
-    <div class="rd-group">
-      <span class="label">Send</span>
-      <div class="segctl">
-        <button data-chord="cad" title="Ctrl+Alt+Del">⌃⌥⌦</button>
-        <button data-keys="1" aria-pressed="false" title="On-screen keys">⌨</button>
-      </div>
     </div>`;
 
   renderDevices();
-
   box.querySelectorAll('[data-monitor]').forEach((b) => b.addEventListener('click', () => {
-    const m = monitors.find((x) => x.name === b.dataset.monitor);
-    if (m) switchMonitor(m);
+    if (!b.dataset.monitor) { focused = null; activeMonitor = null; resetView(); applyTransform(); renderControls(); return; }
+    switchMonitor(b.dataset.monitor);
   }));
-
-  box.querySelectorAll('[data-focus]').forEach((b) => b.addEventListener('click', () => {
-    focused = b.dataset.focus ? monitors.find((m) => m.name === b.dataset.focus) : null;
-    resetView();
-    applyTransform();
-    recentre();
-    renderControls();
-  }));
-
   box.querySelectorAll('[data-fit]').forEach((b) => b.addEventListener('click', () => {
-    fit = b.dataset.fit;
-    resetView();
-    applyTransform();
-    renderControls();
+    fit = b.dataset.fit; resetView(); applyTransform(); renderControls();
   }));
-
-  box.querySelector('[data-chord="cad"]')?.addEventListener('click', sendCtrlAltDel);
-  box.querySelector('[data-keys]')?.addEventListener('click', () => {
-    const keys = root.querySelector('#rd-keys');
-    keys.classList.toggle('is-open');
-    renderKeys();
-  });
-
   root.querySelector('#rd-retry')?.addEventListener('click', () => {
     reconnect.attempt = 0;
     connect();
   });
 }
 
-function renderKeys() {
-  const box = root.querySelector('#rd-keys');
-  if (!box.classList.contains('is-open')) { box.innerHTML = ''; return; }
-
-  const special = ['Escape', 'Tab', 'Backspace', 'Enter', 'Delete',
-    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
-  const label = { Escape: 'Esc', Backspace: '⌫', Enter: '⏎', Delete: 'Del', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', PageUp: 'PgUp', PageDown: 'PgDn' };
-
-  box.innerHTML = `
-    <div class="rd-keyrow">
-      ${[...mods.keys()].map((m) => `
-        <button class="btn btn--sm${mods.get(m) === 'off' ? ' btn--ghost' : ''}"
-                data-mod="${m}" aria-pressed="${mods.get(m) !== 'off'}"
-                title="${mods.get(m) === 'armed' ? 'next key only' : mods.get(m) === 'locked' ? 'locked' : ''}">
-          ${m === 'Control' ? 'Ctrl' : m === 'Shift' ? '⇧' : m === 'Meta' ? '⌘' : 'Alt'}
-        </button>`).join('')}
-      <span class="rd-mod-hint meta">tap once = next key · twice = lock</span>
-    </div>
-    <div class="rd-keyrow">
-      ${special.map((k) => `<button class="btn btn--sm btn--ghost" data-key="${k}">${label[k] || k}</button>`).join('')}
-    </div>
-    <div class="rd-keyrow">
-      ${Array.from({ length: 12 }, (_, i) => `<button class="btn btn--sm btn--ghost" data-key="F${i + 1}">F${i + 1}</button>`).join('')}
-    </div>
-    <div class="rd-keyrow">
-      <button class="btn btn--sm" data-click="left">Left click</button>
-      <button class="btn btn--sm btn--ghost" data-click="middle">Middle</button>
-      <button class="btn btn--sm btn--ghost" data-click="right">Right click</button>
-    </div>`;
-
-  box.querySelectorAll('[data-mod]').forEach((b) => b.addEventListener('click', () => {
-    const m = b.dataset.mod;
-    mods.set(m, mods.get(m) === 'off' ? 'armed' : mods.get(m) === 'armed' ? 'locked' : 'off');
-    renderKeys();
-  }));
-  box.querySelectorAll('[data-key]').forEach((b) => b.addEventListener('click', () => {
-    pressKey(SPECIAL[b.dataset.key]);
-    renderKeys();
-  }));
-  box.querySelectorAll('[data-click]').forEach((b) => b.addEventListener('click', () => clickAt(b.dataset.click)));
-}
-
-/* ── device selection ─────────────────────────────────────────────────── */
-
 async function selectDevice(id) {
   const d = devices.find((x) => x.id === id);
   if (!d || active?.id === id) return;
-
   teardown();
   active = d;
   monitors = [];
+  activeMonitor = null;
   focused = null;
   mode = d.monitors;
+  frameW = frameH = 0;
   resetView();
   reconnect.attempt = 0;
   renderControls();
   await connect();
 }
 
-/* ── pointer + gestures ───────────────────────────────────────────────── */
+/* ── stage wiring ─────────────────────────────────────────────────────── */
 
 function wireStage() {
   const stage = root.querySelector('#rd-stage');
 
-  // Absolute pointer: tap where you want to click. A trackpad-style relative
-  // cursor is better for precision work but worse for everything else, and
-  // the on-screen keys cover the cases where you need a specific button.
-  const toRemote = (clientX, clientY) => {
-    const box = stage.getBoundingClientRect();
-    const r = viewportRect();
-    const base = fit === 'contain' || focused
-      ? Math.min(box.width / r.w, box.height / r.h)
-      : 1;
-    const s = base * zoom;
-    const tx = (box.width - r.w * s) / 2 - r.x * s + panX;
-    const ty = (box.height - r.h * s) / 2 - r.y * s + panY;
-    return {
-      x: Math.round((clientX - box.left - tx) / s),
-      y: Math.round((clientY - box.top - ty) / s),
-    };
-  };
-
   stage.addEventListener('pointerdown', (e) => {
-    if (!client || e.pointerType === 'touch') return;
-    const p = toRemote(e.clientX, e.clientY);
-    cursorX = p.x; cursorY = p.y;
-    sendPointer(e.button === 2 ? BTN.right : e.button === 1 ? BTN.middle : BTN.left);
+    if (e.pointerType === 'touch') return;
+    stage.focus();
     stage.setPointerCapture(e.pointerId);
+    buttonAt(e.clientX, e.clientY, e.button, true);
   });
   stage.addEventListener('pointermove', (e) => {
-    if (!client || e.pointerType === 'touch') return;
-    const p = toRemote(e.clientX, e.clientY);
-    cursorX = p.x; cursorY = p.y;
-    sendPointer(e.buttons & 1 ? BTN.left : e.buttons & 2 ? BTN.right : e.buttons & 4 ? BTN.middle : 0);
+    if (e.pointerType === 'touch') return;
+    pointerAt(e.clientX, e.clientY, e.buttons);
   });
-  stage.addEventListener('pointerup', () => sendPointer(0));
+  stage.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'touch') return;
+    buttonAt(e.clientX, e.clientY, e.button, false);
+  });
   stage.addEventListener('contextmenu', (e) => e.preventDefault());
 
   stage.addEventListener('wheel', (e) => {
-    if (!client) return;
     e.preventDefault();
-    sendPointer(e.deltaY < 0 ? 0x08 : 0x10);
-    setTimeout(() => sendPointer(0), 30);
+    if (active?.transport === 'agent') send({ t: 'scroll', dy: e.deltaY < 0 ? 1 : -1 });
   }, { passive: false });
 
   // Touch: tap to click, pinch to zoom, two-finger drag to pan.
-  let touchStart = null;
+  let touch = null;
   stage.addEventListener('touchstart', (e) => {
     if (e.touches.length === 1) {
-      touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), pinch: null };
+      touch = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(), pinch: null };
     } else if (e.touches.length === 2) {
       const [a, b] = e.touches;
-      touchStart = {
-        pinch: {
-          dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
-          zoom, panX, panY,
-          cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2,
-        },
-      };
+      touch = { pinch: {
+        dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+        zoom, panX, panY,
+        cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2,
+      } };
     }
   }, { passive: true });
 
   stage.addEventListener('touchmove', (e) => {
-    if (e.touches.length === 2 && touchStart?.pinch) {
-      e.preventDefault();
-      const [a, b] = e.touches;
-      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      const cx = (a.clientX + b.clientX) / 2;
-      const cy = (a.clientY + b.clientY) / 2;
-      zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, touchStart.pinch.zoom * (dist / touchStart.pinch.dist)));
-      panX = touchStart.pinch.panX + (cx - touchStart.pinch.cx);
-      panY = touchStart.pinch.panY + (cy - touchStart.pinch.cy);
-      applyTransform();
-    }
+    if (e.touches.length !== 2 || !touch?.pinch) return;
+    e.preventDefault();
+    const [a, b] = e.touches;
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, touch.pinch.zoom * (dist / touch.pinch.dist)));
+    panX = touch.pinch.panX + ((a.clientX + b.clientX) / 2 - touch.pinch.cx);
+    panY = touch.pinch.panY + ((a.clientY + b.clientY) / 2 - touch.pinch.cy);
+    applyTransform();
   }, { passive: false });
 
   stage.addEventListener('touchend', (e) => {
-    // A short single tap with no movement is a click. Anything longer or
-    // draggier was a gesture, and clicking on gesture end is how you end up
-    // opening things by accident while panning.
-    if (touchStart && !touchStart.pinch && e.changedTouches.length === 1) {
+    // A short, still tap is a click. Anything longer or draggier was a
+    // gesture — clicking on gesture end is how you open things by accident
+    // while panning.
+    if (touch && !touch.pinch && e.changedTouches.length === 1) {
       const t = e.changedTouches[0];
-      const moved = Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y);
-      if (moved < 10 && Date.now() - touchStart.t < 400) {
-        const p = toRemote(t.clientX, t.clientY);
-        cursorX = p.x; cursorY = p.y;
-        clickAt('left');
+      const moved = Math.hypot(t.clientX - touch.x, t.clientY - touch.y);
+      if (moved < 10 && Date.now() - touch.t < 400) {
+        buttonAt(t.clientX, t.clientY, 0, true);
+        setTimeout(() => buttonAt(t.clientX, t.clientY, 0, false), 60);
       }
     }
-    touchStart = null;
+    touch = null;
   }, { passive: true });
 
-  // Physical keyboard, when there is one.
-  const onKeyDown = (e) => {
-    if (!client || state !== 'connected') return;
-    if (e.metaKey && e.key === 'v') return;      // let the browser paste
-    const ks = SPECIAL[e.key] ?? (e.key.length === 1 ? e.key.charCodeAt(0) : null);
-    if (ks == null) return;
-    e.preventDefault();
-    if (e.ctrlKey) client.sendKeyEvent(1, MOD_KEYSYM.Control);
-    if (e.altKey) client.sendKeyEvent(1, MOD_KEYSYM.Alt);
-    if (e.shiftKey) client.sendKeyEvent(1, MOD_KEYSYM.Shift);
-    client.sendKeyEvent(1, ks);
-    client.sendKeyEvent(0, ks);
-    if (e.shiftKey) client.sendKeyEvent(0, MOD_KEYSYM.Shift);
-    if (e.altKey) client.sendKeyEvent(0, MOD_KEYSYM.Alt);
-    if (e.ctrlKey) client.sendKeyEvent(0, MOD_KEYSYM.Control);
-  };
-  window.addEventListener('keydown', onKeyDown);
-  ctx.onCleanup(() => window.removeEventListener('keydown', onKeyDown));
+  stage.addEventListener('keydown', onKeyDown);
+  stage.addEventListener('keyup', onKeyUp);
 
   const onResize = () => applyTransform();
   window.addEventListener('resize', onResize);
@@ -862,13 +742,10 @@ function wireStage() {
 /* ── module contract ──────────────────────────────────────────────────── */
 
 export default {
-  async mount(el, context) {
-    root = el;
+  async mount(mountEl, context) {
+    root = mountEl;
     ctx = context;
 
-    // A module ships its own CSS and injects it once. Scoped by an id so a
-    // remount does not stack duplicate stylesheets, and loaded from ctx.base
-    // so it resolves whether mounted (/remote/ui/…) or standalone (/ui/…).
     if (!document.getElementById('rd-css')) {
       const link = document.createElement('link');
       link.id = 'rd-css';
@@ -877,16 +754,12 @@ export default {
       document.head.appendChild(link);
     }
 
-    Guacamole = (await import(`${ctx.base}/guac-js/guacamole-common.js`)).default;
-
-    el.innerHTML = shell();
+    mountEl.innerHTML = shell();
+    wireStage();
 
     devices = (await ctx.api('/devices')).devices || [];
     renderControls();
-    wireStage();
 
-    // Presence pushed from the server, so a machine finishing its boot shows
-    // up on its own rather than on the next manual refresh.
     ctx.sse('/events', {
       events: {
         devices: ({ devices: next }) => {
@@ -894,36 +767,31 @@ export default {
           devices = next;
           renderDevices();
           const now = devices.find((d) => d.id === active?.id)?.online;
-
-          // A device that just came back should reconnect on its own — that is
-          // the entire point of watching presence.
+          // A machine that finished booting should come back on its own —
+          // that is the entire point of watching presence.
           if (active && before === false && now === true && state !== 'connected') {
             reconnect.attempt = 0;
             connect();
           }
           if (active && now === false && state === 'connected') {
-            setState('offline', `${active.name} went offline`, 'the host stopped accepting connections');
+            setState('offline', `${active.name} went offline`, 'the host stopped answering');
           }
         },
       },
     });
 
-    // Prefer something that is actually up.
     const first = devices.find((d) => d.online === true) || devices[0];
     if (!first) {
       setState('failed', 'No devices configured', 'add one to devices.json');
       return;
     }
-    // Not awaited: mount() should return as soon as the UI is on screen. A
-    // connection can take seconds, and blocking mount on it would leave the
-    // shell showing a skeleton the whole time — and would surface a
-    // connection failure as a MODULE failure.
+    // Not awaited: mount() should return once the UI is on screen. Blocking on
+    // a connection would surface a CONNECTION failure as a MODULE failure and
+    // let the host replace this UI with its generic error panel.
     selectDevice(first.id);
   },
 
   async setView() {
-    // One view. Re-applying the transform covers a resize that happened while
-    // this module was not the visible one.
     applyTransform();
   },
 
@@ -932,7 +800,10 @@ export default {
     devices = [];
     active = null;
     monitors = [];
+    canvas = null;
+    gctx = null;
     root = null;
     ctx = null;
   },
 };
+

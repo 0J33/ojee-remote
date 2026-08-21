@@ -233,6 +233,18 @@ a:hover { color: var(--accent); }
 }
 .skip:focus { left: 0; }
 
+/* The `hidden` attribute must actually hide.
+   The UA stylesheet's `[hidden] { display: none }` loses to ANY author
+   `display:` declaration — same specificity, and author styles beat UA styles
+   outright. So `.btn { display: inline-flex }` silently defeats
+   `button.hidden = true`, and the control stays on screen while every
+   JS check reports it hidden. That mismatch is genuinely hard to debug: the
+   DOM says hidden, the screen says otherwise.
+
+   !important is warranted here precisely because this must outrank every
+   component's own display rule. */
+[hidden] { display: none !important; }
+
 /* Visually hidden but announced. */
 .sr-only {
   position: absolute; width: 1px; height: 1px;

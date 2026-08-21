@@ -37,6 +37,7 @@ import GuacCrypt from 'guacamole-lite/lib/Crypt.js';
 
 import { DeviceRegistry } from './devices.js';
 import { HostAgents } from './agents.js';
+import { createAgentProxy } from './agent-proxy.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
@@ -51,18 +52,27 @@ const {
   PRESENCE_INTERVAL_MS = '5000',
 } = process.env;
 
-if (!GUAC_KEY || GUAC_KEY.length !== 32) {
-  // guacamole-lite's AES-256-CBC needs exactly 32 bytes. A wrong length fails
-  // deep inside the crypt layer with an opaque error at first connect, so
-  // check it at boot where the message can be useful.
-  throw new Error('GUAC_KEY must be exactly 32 characters. Generate: openssl rand -hex 16');
-}
+// guacd is only needed for rdp/vnc devices — the Linux path goes through the
+// host agent instead. A deployment with only agent-backed devices should not
+// be forced to run guacd or invent a key for it.
+const NEEDS_GUACD = () => devices.devices.some((d) => d.transport !== 'agent');
 
 const devices = new DeviceRegistry({
   file: DEVICES_FILE,
   intervalMs: Number(PRESENCE_INTERVAL_MS),
 });
 const agents = new HostAgents();
+
+if (NEEDS_GUACD() && (!GUAC_KEY || GUAC_KEY.length !== 32)) {
+  // guacamole-lite's AES-256-CBC needs exactly 32 bytes. A wrong length fails
+  // deep inside the crypt layer with an opaque error at first connect, so it
+  // is checked at boot where the message can actually help.
+  throw new Error(
+    'GUAC_KEY must be exactly 32 characters for rdp/vnc devices.\n'
+    + '  Generate: openssl rand -hex 16\n'
+    + '  (agent-backed devices do not need it — remove the rdp/vnc devices to drop the requirement.)',
+  );
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -78,7 +88,7 @@ const MANIFEST = {
   views: [{ id: 'screen', label: 'Screen', icon: 'i-monitor' }],
   ui: '/ui/index.js',
   health: '/api/health',
-  capabilities: ['sse', 'fullscreen'],
+  capabilities: ['sse', 'fullscreen', 'webcodecs'],
 };
 
 app.get('/module.json', (_req, res) => res.json(MANIFEST));
@@ -96,7 +106,11 @@ app.get('/api/health', (_req, res) => {
       : `no device reachable (${list.map((d) => d.name).join(', ')})`,
     devices: list.length,
     online: online.length,
-    guacd: `${GUACD_HOST}:${GUACD_PORT}`,
+    transports: {
+      agent: list.filter((d) => d.transport === 'agent').length,
+      rdp: list.filter((d) => d.transport !== 'agent').length,
+    },
+    guacd: NEEDS_GUACD() ? `${GUACD_HOST}:${GUACD_PORT}` : 'not required',
   });
 });
 
@@ -140,7 +154,7 @@ app.get('/api/devices/:id/monitors', async (req, res) => {
   const d = devices.get(req.params.id);
   if (!d) return res.status(404).json({ error: 'unknown_device' });
 
-  if (d.monitors !== 'primary-switch') {
+  if (d.transport !== 'agent' && d.monitors !== 'primary-switch') {
     // multimon sends every screen in one stream; the client crops locally, so
     // there is nothing for the server to enumerate.
     return res.json({ mode: d.monitors, monitors: [] });
@@ -267,7 +281,7 @@ app.use(express.static(join(ROOT, 'public'), { extensions: ['html'] }));
 
 const server = createServer(app);
 
-const guac = new GuacamoleLite(
+const guac = NEEDS_GUACD() ? new GuacamoleLite(
   // `server: undefined` is load-bearing: guacamole-lite injects a default
   // `port: 8080` unless a `server` key is present, and ws refuses a config
   // holding both `port` and `noServer`.
@@ -280,26 +294,35 @@ const guac = new GuacamoleLite(
     // last frame — the "connects but not really" symptom. 0 disables it.
     maxInactivityTime: 0,
   },
-);
+) : null;
 
 // guacamole-lite hijacks SIGTERM/SIGINT to close its ws server WITHOUT exiting
 // the process, leaving a zombie that answers HTTP but 503s every tunnel and
 // makes systemd restarts hang until SIGKILL. Detach; the default signal
 // behaviour (exit) is what we want.
-process.removeListener('SIGTERM', guac.sigTermHandler);
-process.removeListener('SIGINT', guac.sigIntHandler);
+if (guac) {
+  process.removeListener('SIGTERM', guac.sigTermHandler);
+  process.removeListener('SIGINT', guac.sigIntHandler);
+}
+
+const agentProxy = createAgentProxy({ devices });
 
 server.on('upgrade', (req, socket, head) => {
+  // Auth already happened: mounted, the console's three gates ran before it
+  // proxied here; standalone, the tailnet is the boundary.
+
+  // Agent-backed devices — the Linux path. The proxy attaches the agent's
+  // bearer token, which the browser therefore never has to hold.
+  if (agentProxy.handleUpgrade(req, socket, head)) return;
+
   const { pathname } = new URL(req.url, 'http://x');
-  if (pathname !== '/guac') {
-    socket.destroy();
+  if (pathname === '/guac' && guac) {
+    guac.webSocketServer.handleUpgrade(req, socket, head, (ws) =>
+      guac.webSocketServer.emit('connection', ws, req));
     return;
   }
-  // Auth already happened: mounted, the console gate ran before proxying;
-  // standalone, the tailnet is the boundary. The token in the query is
-  // itself unforgeable without GUAC_KEY.
-  guac.webSocketServer.handleUpgrade(req, socket, head, (ws) =>
-    guac.webSocketServer.emit('connection', ws, req));
+  socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+  socket.destroy();
 });
 
 /* ── boot ───────────────────────────────────────────────────────────────── */
@@ -308,10 +331,10 @@ devices.start({ onChange: broadcast });
 
 server.listen(Number(PORT), HOST, () => {
   console.log(`ojee-remote ${pkg.version} on http://${HOST}:${PORT}`);
-  console.log(`  guacd ${GUACD_HOST}:${GUACD_PORT}`);
+  console.log(`  guacd ${NEEDS_GUACD() ? `${GUACD_HOST}:${GUACD_PORT}` : 'not required (no rdp/vnc devices)'}`);
   for (const d of devices.devices) {
-    const agent = d.agent ? ` via agent ${d.agent.url}` : '';
-    console.log(`  ${d.id.padEnd(14)} ${d.protocol}://${d.host}:${d.port}  [${d.monitors}]${agent}`);
+    const where = d.transport === 'agent' ? d.agent.url : `${d.protocol}://${d.host}:${d.port}`;
+    console.log(`  ${d.id.padEnd(14)} ${d.transport.padEnd(6)} ${where}  [${d.monitors}]`);
   }
 });
 

@@ -23,22 +23,38 @@ import { connect } from 'node:net';
 const PROBE_TIMEOUT_MS = 2500;
 
 /**
- * How each device's monitors behave. Declared per device rather than inferred,
- * because the two are genuinely different and the UI has to be honest about it:
+ * How a device's monitors behave. Declared per device rather than inferred,
+ * because they are genuinely different and the UI has to be honest about it.
  *
- *   primary-switch  gnome-remote-desktop streams ONE monitor — whichever is
- *                   primary. Switching means asking the host agent to move the
- *                   primary flag, which rebuilds the session. You see one
- *                   screen at a time and there is no way around it.
+ *   portal          the host agent captures any monitor through the desktop
+ *                   portal. Switching re-points the encoder; the machine's
+ *                   PRIMARY display is never touched, so nobody sitting at it
+ *                   has their top bar and dock moved. Linux default.
  *
- *   multimon        the RDP server sends every monitor in one stream. The
- *                   client shows the merged canvas and crops locally, so
- *                   switching is instant and free. Windows can do this;
- *                   gnome-remote-desktop cannot.
+ *   multimon        the RDP server sends every monitor in one stream and the
+ *                   client crops locally, so switching is instant and free.
+ *                   Windows can do this; gnome-remote-desktop cannot.
  *
  *   single          one screen, no switching (a headless box, a VM).
+ *
+ *   primary-switch  legacy. Streams whichever monitor is primary and switches
+ *                   by MOVING the primary flag — which rearranges the local
+ *                   desktop. Kept only for hosts that cannot run the agent.
  */
-const MONITOR_MODES = new Set(['primary-switch', 'multimon', 'single']);
+const MONITOR_MODES = new Set(['portal', 'multimon', 'single', 'primary-switch']);
+
+/**
+ * How the gateway reaches a device's pixels.
+ *
+ *   agent  A host agent captures via the desktop portal and streams H.264 over
+ *          a WebSocket. Any monitor, or all of them, and the machine's PRIMARY
+ *          display is never touched. This is the Linux path.
+ *
+ *   rdp    guacd speaks RDP to the machine. Windows can stream every monitor
+ *          in one session (multimon), which gnome-remote-desktop cannot — so
+ *          the Windows side gets the merged canvas for free.
+ */
+const TRANSPORTS = new Set(['agent', 'rdp', 'vnc']);
 
 export class DeviceRegistry {
   /**
@@ -76,25 +92,33 @@ export class DeviceRegistry {
       seen.add(d.id);
       if (!d.host) throw new Error(`${where}: host is required.`);
 
-      const protocol = d.protocol || 'rdp';
-      if (!['rdp', 'vnc'].includes(protocol)) {
-        throw new Error(`${where}: protocol must be "rdp" or "vnc".`);
+      // `transport` is the new axis; `protocol` is kept for rdp/vnc devices.
+      const transport = d.transport || (d.agent?.url ? 'agent' : 'rdp');
+      if (!TRANSPORTS.has(transport)) {
+        throw new Error(`${where}: transport must be one of ${[...TRANSPORTS].join(', ')}.`);
       }
+      const protocol = d.protocol || (transport === 'agent' ? 'h264' : 'rdp');
 
-      const monitors = d.monitors || (protocol === 'rdp' ? 'single' : 'single');
+      const monitors = d.monitors || (transport === 'agent' ? 'portal' : 'single');
       if (!MONITOR_MODES.has(monitors)) {
         throw new Error(`${where}: monitors must be one of ${[...MONITOR_MODES].join(', ')}.`);
       }
-      if (monitors === 'primary-switch' && !d.agent?.url) {
-        // Catch this at load rather than at the first click. Without an agent
-        // there is no way to move the primary flag, so the chips would render
-        // and then fail on use.
-        throw new Error(`${where}: monitors "primary-switch" needs an agent — install agent/ on that host and set agent.url.`);
+      if (transport === 'agent' && !d.agent?.url) {
+        // Caught at load rather than at the first click: without an agent there
+        // is nothing to stream from, so the device would render and then fail.
+        throw new Error(`${where}: transport "agent" needs agent.url — install agent/ on that host.`);
+      }
+      if (monitors === 'primary-switch') {
+        // Supported, but it moves the machine's primary display and rearranges
+        // the desk of whoever is sitting at it. "portal" does the same job
+        // without that cost; this exists only for hosts that cannot run the agent.
+        console.warn(`[devices] ${d.id}: monitors "primary-switch" MOVES the primary display on that machine. Prefer "portal".`);
       }
 
       return {
         id: d.id,
         name: d.name || d.id,
+        transport,
         protocol,
         host: d.host,
         port: Number(d.port) || (protocol === 'rdp' ? 3389 : 5900),
@@ -132,6 +156,7 @@ export class DeviceRegistry {
     return {
       id: d.id,
       name: d.name,
+      transport: d.transport,
       protocol: d.protocol,
       monitors: d.monitors,
       hasAgent: !!d.agent?.url,
@@ -152,10 +177,22 @@ export class DeviceRegistry {
    * gnome-remote-desktop opens and tears down a session, and doing that every
    * five seconds would fight the real client for the socket.
    */
+  /** Where a probe should actually connect for this device. */
+  probeTarget(device) {
+    // An agent-backed device is reachable when its AGENT answers, not when some
+    // RDP port does — it may not be running an RDP server at all. Probing
+    // device.port there would report every Linux host permanently offline.
+    if (device.transport === 'agent' && device.agent?.url) {
+      const u = new URL(device.agent.url);
+      return { host: u.hostname, port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80) };
+    }
+    return { host: device.host, port: device.port };
+  }
+
   probe(device) {
     return new Promise((resolve) => {
       const started = Date.now();
-      const sock = connect({ host: device.host, port: device.port });
+      const sock = connect(this.probeTarget(device));
       let settled = false;
 
       const done = (online, error) => {
@@ -207,4 +244,4 @@ export class DeviceRegistry {
   }
 }
 
-export { MONITOR_MODES, PROBE_TIMEOUT_MS };
+export { MONITOR_MODES, TRANSPORTS, PROBE_TIMEOUT_MS };
