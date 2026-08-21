@@ -1,0 +1,67 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>decode probe</title>
+<style>body{background:#08080e;color:#e8e6df;font:13px monospace;margin:0;padding:12px}
+canvas{border:1px solid #606370;max-width:100%;display:block;margin-top:10px}
+#log{white-space:pre-wrap;line-height:1.5}</style></head><body>
+<div id="log">starting…</div><canvas id="c"></canvas>
+<script>
+const log = (m) => { document.getElementById('log').textContent += "\n" + m; };
+const params = new URLSearchParams(location.search);
+const url = params.get('ws');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+window.__probe = { frames: 0, error: null, ready: null, decoded: false };
+
+if (!('VideoDecoder' in window)) { log('FAIL: WebCodecs VideoDecoder unavailable'); window.__probe.error='no-webcodecs'; }
+else {
+  log('WebCodecs: available');
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  let decoder = null, configured = false, waitingKey = true;
+
+  ws.onopen = () => log('ws: open');
+  ws.onerror = (e) => { log('ws: ERROR'); window.__probe.error = 'ws-error'; };
+  ws.onclose = (e) => log('ws: closed ' + e.code);
+
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.t === 'ping') { ws.send(JSON.stringify({t:'pong', ts:m.ts})); return; }
+      if (m.t === 'ready') {
+        window.__probe.ready = m;
+        log(`ready: ${m.active} ${m.w}x${m.h} codec=${m.codec} enc=${m.encoder}`);
+        canvas.width = m.w; canvas.height = m.h;
+        decoder = new VideoDecoder({
+          output: (frame) => {
+            window.__probe.frames++;
+            window.__probe.decoded = true;
+            ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+            frame.close();
+          },
+          error: (e) => { log('decoder ERROR: ' + e.message); window.__probe.error = e.message; },
+        });
+        // annexb: no description needed; the stream carries SPS/PPS per keyframe.
+        const cfg = { codec: m.codec, codedWidth: m.w, codedHeight: m.h,
+                      optimizeForLatency: true };
+        const sup = await VideoDecoder.isConfigSupported(cfg);
+        log('isConfigSupported: ' + sup.supported);
+        if (!sup.supported) { window.__probe.error='config-unsupported'; return; }
+        decoder.configure(cfg);
+        configured = true;
+      }
+      return;
+    }
+    if (!configured) return;
+    const buf = new Uint8Array(ev.data);
+    const key = (buf[0] & 0x80) !== 0;
+    if (waitingKey && !key) return;          // cannot start on a delta
+    waitingKey = false;
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: key ? 'key' : 'delta',
+        timestamp: performance.now() * 1000,
+        data: buf.subarray(1),
+      }));
+    } catch (e) { log('decode threw: ' + e.message); window.__probe.error = e.message; }
+  };
+}
+</script></body></html>

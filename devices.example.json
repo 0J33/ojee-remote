@@ -1,0 +1,43 @@
+[
+  {
+    "_comment": [
+      "Every machine you can remote into. The gateway runs on the always-on box",
+      "and dials these over the tailnet, so a laptop being asleep or booted into",
+      "the other OS is a normal state the UI reports, not a failure.",
+      "",
+      "monitors:",
+      "  primary-switch  gnome-remote-desktop streams ONE monitor (whichever is",
+      "                  primary). Switching rebuilds the session, so this needs",
+      "                  the host agent — see agent/README.md.",
+      "  multimon        the RDP server sends every screen in one stream; the",
+      "                  client crops locally, so switching is instant. Windows",
+      "                  can do this.",
+      "  single          one screen, no switching."
+    ],
+
+    "id": "loq-linux",
+    "name": "LOQ · Linux",
+    "protocol": "rdp",
+    "host": "100.81.241.55",
+    "port": 3390,
+    "username": "guac",
+    "password": "set-me",
+    "monitors": "primary-switch",
+    "agent": {
+      "url": "http://100.81.241.55:8210",
+      "token": "set-me-to-the-agents-AGENT_TOKEN"
+    },
+    "presence": { "intervalMs": 5000 }
+  },
+  {
+    "id": "loq-windows",
+    "name": "LOQ · Windows",
+    "protocol": "rdp",
+    "host": "100.124.84.79",
+    "port": 3389,
+    "username": "your-windows-user",
+    "password": "set-me",
+    "monitors": "multimon",
+    "presence": { "intervalMs": 5000 }
+  }
+]

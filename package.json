@@ -1,0 +1,22 @@
+{
+  "name": "ojee-remote",
+  "version": "1.0.0",
+  "description": "Browser remote desktop over a tailnet. Multi-device, presence-aware, with a monitor switch that never shows a black screen. Runs standalone or as an ojee-console module.",
+  "license": "MIT",
+  "author": "ojee <https://ojee.net>",
+  "repository": { "type": "git", "url": "git+https://github.com/0J33/ojee-remote.git" },
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:dom": "bash tests/check-dom.sh"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "guacamole-common-js": "^1.5.0",
+    "guacamole-lite": "^1.2.0"
+  }
+}

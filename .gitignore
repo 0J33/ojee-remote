@@ -1,0 +1,17 @@
+node_modules/
+*.log
+.DS_Store
+
+# Secrets and deployment state — never commit these.
+.env
+# Holds RDP/VNC credentials for every device.
+devices.json
+# The portal restore token, per machine.
+portal.json
+agent/__pycache__/
+__pycache__/
+*.pyc
+
+# Test artefacts
+tests/*.png
+tests/*.jpg
