@@ -112,10 +112,45 @@ class Agent:
         self.clients = set()
         self.loop = None             # asyncio loop, set in main()
         self._lock = threading.Lock()
+        # Set when a pipeline reports a stale node id; the next start re-opens
+        # the grant instead of reusing a session we know is dead.
+        self.session_stale = False
 
     # ── setup ──────────────────────────────────────────────────────────
     def open_portal(self):
         """Restore the saved grant. Silent — no dialog — once approved once."""
+        self.session, self.streams = portal.open_screencast()
+        self.refresh_monitors()
+
+    def reacquire_portal(self):
+        """Throw away a dead ScreenCast session and restore a fresh one.
+
+        A portal session does NOT last forever. Clicking "Stop Streaming" in
+        the shell's screen-share indicator revokes it outright, and the
+        compositor can drop it on its own. After that the session handle
+        answers every call with
+
+            org.freedesktop.DBus.Error.AccessDenied: Invalid session
+
+        and the PipeWire node ids captured with it are gone, which surfaces
+        one layer down as
+
+            gstpipewiresrc: target not found
+
+        The agent used to open exactly one session at startup and keep it for
+        the life of the process, so the first revocation ended streaming until
+        someone restarted the service — and nothing said why. Re-opening uses
+        the saved restore_token, so it is silent in the normal case; it only
+        prompts if the token itself was invalidated, which is correct, because
+        that is the user having genuinely withdrawn consent.
+        """
+        print("[portal] session is dead — restoring a fresh grant", flush=True)
+        try:
+            portal.close_session(self.session)
+        except Exception:                                  # noqa: BLE001
+            pass                                            # it is already gone
+        self.session = None
+        self.streams = []
         self.session, self.streams = portal.open_screencast()
         self.refresh_monitors()
 
@@ -174,19 +209,46 @@ class Agent:
                 self.stream.stop()
                 self.stream = None
 
+            if self.session_stale:
+                self.session_stale = False
+                self.reacquire_portal()
+                m = self.monitor(name) or m
+
             # A FRESH pipewire fd per pipeline. pipewiresrc takes ownership and
             # closes it on teardown, so reusing one leaves every later pipeline
             # reading a closed descriptor and silently producing nothing.
-            fd = portal.open_pipewire_fd(self.session)
+            #
+            # Retried ONCE through a fresh grant: the common failure here is a
+            # session that was revoked while nobody was streaming, and the only
+            # way to find out is to try. A second failure is real and is raised.
+            try:
+                fd = portal.open_pipewire_fd(self.session)
+            except Exception as first:                     # noqa: BLE001
+                print(f"[portal] {first}", flush=True)
+                self.reacquire_portal()
+                m = self.monitor(name) or m                # node ids changed
+                fd = portal.open_pipewire_fd(self.session)
+
             self.stream = capture.MonitorStream(
                 fd=fd, node_id=m["node_id"], fps=FPS,
                 on_unit=self._on_unit,
-                on_error=lambda e: print(f"[capture] {e}", flush=True),
+                on_error=self._on_capture_error,
             )
             self.stream.start()
             self.active = name
 
         return {"monitor": name, "w": m["w"], "h": m["h"], "encoder": self.stream.encoder_name}
+
+    def _on_capture_error(self, err):
+        """GStreamer errors arrive here, from its own thread.
+
+        "target not found" means the node id is stale — the session died and
+        we only learn it when the pipeline tries to attach. Mark the session so
+        the next start re-acquires rather than failing the same way forever.
+        """
+        print(f"[capture] {err}", flush=True)
+        if "target not found" in str(err).lower():
+            self.session_stale = True
 
     def _on_unit(self, data: bytes, keyframe: bool):
         """Called from the GStreamer thread — hop to the asyncio loop."""
