@@ -46,6 +46,10 @@ let decoder = null;
 let canvas = null;
 let gctx = null;
 let waitingKey = true;
+let sps = null;               // in-band SPS from the keyframe
+let pps = null;               // in-band PPS
+let avcc = null;              // { description, codec } once both are seen
+let decodeErrors = 0;
 
 let guac = null;              // rdp transport
 let guacEl = null;
@@ -157,6 +161,10 @@ async function connectAgent(gen) {
   ws.binaryType = 'arraybuffer';
   socket = ws;
 
+  // A NEW connection must forget the previous stream's parameter sets: a
+  // different monitor has a different resolution, so its SPS differs and a
+  // stale avcC would describe the wrong picture size.
+  sps = pps = avcc = null;
   let opened = false;
 
   ws.onopen = () => { opened = true; };
@@ -192,10 +200,42 @@ async function connectAgent(gen) {
     }
 
     try {
+      const nals = splitNals(buf.subarray(1));
+      if (!nals.length) return;
+
+      // SPS (7) and PPS (8) travel in-band ahead of each keyframe. They are
+      // what the avcC record is built from, and they must NOT also be fed as
+      // picture data.
+      const picture = [];
+      let paramsChanged = false;
+      for (const u of nals) {
+        const t = u[0] & 0x1f;
+        // Compare before storing: a monitor switch sends a NEW SPS for the new
+        // resolution over the SAME socket, so "have we seen one yet" is the
+        // wrong question. Rebuilding only when avcc was null left the decoder
+        // describing the previous monitor's picture size, which decodes to a
+        // black frame at a plausible frame rate — the worst kind of failure.
+        if (t === 7) { if (!sameNal(sps, u)) { sps = u; paramsChanged = true; } }
+        else if (t === 8) { if (!sameNal(pps, u)) { pps = u; paramsChanged = true; } }
+        else picture.push(u);
+      }
+
+      if ((paramsChanged || !avcc) && sps && pps) {
+        avcc = buildAvcC(sps, pps);
+        if (avcc) {
+          // Re-configure now that the real profile and level are known: the
+          // codec string guessed before the first keyframe can be wrong, and
+          // Safari refuses a mismatch outright.
+          await configureDecoder(avcc.codec, frameW, frameH, gen, avcc);
+          if (gen !== reconnect.generation) return;
+        }
+      }
+      if (!picture.length) return;
+
       decoder.decode(new EncodedVideoChunk({
         type: key ? 'key' : 'delta',
         timestamp: performance.now() * 1000,
-        data: buf.subarray(1),
+        data: toAvcc(picture),
       }));
     } catch (e) {
       // A decoder that has gone bad cannot be recovered in place; ask for a
@@ -238,18 +278,27 @@ async function handleControl(msg, ws, gen) {
   }
 }
 
-async function configureDecoder(codec, w, h, gen) {
+async function configureDecoder(codec, w, h, gen, avcc = null) {
   frameW = w || frameW;
   frameH = h || frameH;
 
   try { decoder?.close(); } catch { /* already closed */ }
   waitingKey = true;
+  decodeErrors = 0;
 
   ensureCanvas();
   canvas.width = frameW;
   canvas.height = frameH;
 
-  const config = { codec, codedWidth: frameW, codedHeight: frameH, optimizeForLatency: true };
+  // description present => AVCC. Safari only decodes this form; Chrome takes
+  // it too, so both browsers run the same path rather than one of them
+  // relying on Annex-B support the other does not have.
+  const config = {
+    codec: avcc?.codec || codec,
+    codedWidth: frameW, codedHeight: frameH,
+    optimizeForLatency: true,
+    ...(avcc?.description ? { description: avcc.description } : {}),
+  };
   const support = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }));
   if (gen !== reconnect.generation) return;
 
@@ -269,8 +318,16 @@ async function configureDecoder(codec, w, h, gen) {
       frame.close();
     },
     error: (e) => {
+      // Not just a console warning: a decoder that errors every frame looks
+      // identical to a working connection with a black screen, which is how
+      // this went unnoticed on iOS.
       console.warn('[remote] decoder error:', e.message);
+      decodeErrors += 1;
       waitingKey = true;
+      if (decodeErrors === 1 || decodeErrors % 30 === 0) {
+        setState('degraded', 'Connected, but nothing decodes',
+          `${e.message || 'decoder error'} — ${stats.decoded} frames drawn`);
+      }
     },
   });
   decoder.configure(config);
@@ -503,6 +560,94 @@ function buttonAt(clientX, clientY, button, down) {
   if (active?.transport === 'agent') {
     send({ t: 'button', b: BTN[button] || 'left', down });
   }
+}
+
+
+/* ── H.264 bitstream ──────────────────────────────────────────────────── */
+
+/* The agent sends Annex-B: NAL units separated by 00 00 01 / 00 00 00 01
+   start codes. Chrome's VideoDecoder accepts that when `description` is
+   omitted. Safari does NOT — it wants AVCC: an `avcC` description built from
+   the SPS/PPS, and each access unit as length-prefixed NALs. Without it the
+   stream connects, the decoder configures, and not one frame ever comes out,
+   which is exactly "connected but nothing is showing" on an iPhone.
+
+   Converting is the right fix rather than a Safari special case: AVCC works
+   everywhere, so both browsers take the same path. */
+
+function splitNals(buf) {
+  const nals = [];
+  let i = 0;
+  const n = buf.length;
+  // Find the first start code.
+  const startAt = (p) => {
+    for (let k = p; k + 2 < n; k++) {
+      if (buf[k] === 0 && buf[k + 1] === 0) {
+        if (buf[k + 2] === 1) return [k, 3];
+        if (buf[k + 2] === 0 && k + 3 < n && buf[k + 3] === 1) return [k, 4];
+      }
+    }
+    return null;
+  };
+  let cur = startAt(0);
+  if (!cur) return nals;
+  i = cur[0] + cur[1];
+  while (i < n) {
+    const next = startAt(i);
+    const end = next ? next[0] : n;
+    if (end > i) nals.push(buf.subarray(i, end));
+    if (!next) break;
+    i = next[0] + next[1];
+  }
+  return nals;
+}
+
+/** Length-prefixed (4-byte) form of one access unit. */
+function toAvcc(nals) {
+  let total = 0;
+  for (const u of nals) total += 4 + u.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const u of nals) {
+    out[o] = (u.length >>> 24) & 0xff;
+    out[o + 1] = (u.length >>> 16) & 0xff;
+    out[o + 2] = (u.length >>> 8) & 0xff;
+    out[o + 3] = u.length & 0xff;
+    out.set(u, o + 4);
+    o += 4 + u.length;
+  }
+  return out;
+}
+
+/** Build an avcC record and the matching `avc1.PPCCLL` codec string. */
+/** Byte-equality for two NAL units; null-safe. */
+function sameNal(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function buildAvcC(sps, pps) {
+  if (!sps || !pps || sps.length < 4) return null;
+  const profile = sps[1], compat = sps[2], level = sps[3];
+  const len = 7 + 2 + sps.length + 1 + 2 + pps.length;
+  const b = new Uint8Array(len);
+  let o = 0;
+  b[o++] = 1;                       // configurationVersion
+  b[o++] = profile;
+  b[o++] = compat;
+  b[o++] = level;
+  b[o++] = 0xff;                    // 6 bits reserved | lengthSizeMinusOne = 3
+  b[o++] = 0xe1;                    // 3 bits reserved | numOfSPS = 1
+  b[o++] = (sps.length >> 8) & 0xff;
+  b[o++] = sps.length & 0xff;
+  b.set(sps, o); o += sps.length;
+  b[o++] = 1;                       // numOfPPS
+  b[o++] = (pps.length >> 8) & 0xff;
+  b[o++] = pps.length & 0xff;
+  b.set(pps, o);
+  const hex = (v) => v.toString(16).padStart(2, '0');
+  return { description: b, codec: `avc1.${hex(profile)}${hex(compat)}${hex(level)}` };
 }
 
 /* ── keyboard ─────────────────────────────────────────────────────────── */
