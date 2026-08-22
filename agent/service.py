@@ -43,6 +43,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -60,7 +61,29 @@ import inject  # noqa: E402
 import pin  # noqa: E402
 import portal  # noqa: E402
 
-HOST = os.environ.get("AGENT_BIND", "0.0.0.0")
+def _default_bind() -> str:
+    """This machine's Tailscale address, or loopback — never 0.0.0.0.
+
+    0.0.0.0 puts a screen-capture and input-injection endpoint on every
+    interface the machine has. On a laptop that means whatever wifi it is
+    joined to, with a bearer token as the only thing in the way. Defaulting
+    to the tailnet address means the port does not exist off the tailnet.
+
+    Falling back to loopback rather than 0.0.0.0 keeps the failure SAFE: with
+    Tailscale down the agent starts unreachable instead of starting wide open.
+    """
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"],
+                           capture_output=True, text=True, timeout=5)
+        addr = (r.stdout or "").strip().splitlines()
+        if r.returncode == 0 and addr and addr[0].strip():
+            return addr[0].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "127.0.0.1"
+
+
+HOST = os.environ.get("AGENT_BIND") or _default_bind()
 PORT = int(os.environ.get("AGENT_PORT", "8210"))
 TOKEN = os.environ.get("AGENT_TOKEN", "")
 NAME = os.environ.get("AGENT_NAME", socket.gethostname())

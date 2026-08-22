@@ -1,0 +1,10 @@
+node_modules
+.git
+.env
+devices.json
+portal.json
+agent/__pycache__
+tests
+docs
+windows
+*.log
