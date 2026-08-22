@@ -162,10 +162,13 @@ if ($tsIp) {
     "host": "$tsIp",
     "port": 3389,
     "username": "$env:USERNAME",
-    "password": "<your Windows password>",
+    "password": "",
     "monitors": "multimon"
   }
 "@
+    Write-Host ''
+    Write-Host '  Fill in "password" with the Windows password for this account.' -ForegroundColor DarkGray
+    Write-Host '  devices.json is gitignored, so it is the right place for it.' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  "multimon" is the point: Windows streams every monitor in one' -ForegroundColor DarkGray
     Write-Host '  session, so switching screens is a client-side crop with no' -ForegroundColor DarkGray

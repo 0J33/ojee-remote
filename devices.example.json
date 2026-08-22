@@ -12,20 +12,26 @@
       "  multimon        the RDP server sends every screen in one stream; the",
       "                  client crops locally, so switching is instant. Windows",
       "                  can do this.",
-      "  single          one screen, no switching."
+      "  single          one screen, no switching.",
+      "",
+      "host is whatever your tailnet calls the machine. A MagicDNS name beats a",
+      "100.x address, which can change when a node is re-authed.",
+      "",
+      "password and agent.token are blank ON PURPOSE. Fill them in your own",
+      "devices.json — that file is gitignored; this one is committed."
     ],
 
     "id": "loq-linux",
     "name": "LOQ · Linux",
     "protocol": "rdp",
-    "host": "100.81.241.55",
+    "host": "your-linux-box",
     "port": 3390,
-    "username": "guac",
-    "password": "set-me",
+    "username": "your-rdp-user",
+    "password": "",
     "monitors": "primary-switch",
     "agent": {
-      "url": "http://100.81.241.55:8210",
-      "token": "set-me-to-the-agents-AGENT_TOKEN"
+      "url": "http://your-linux-box:8210",
+      "token": ""
     },
     "presence": { "intervalMs": 5000 }
   },
@@ -33,10 +39,10 @@
     "id": "loq-windows",
     "name": "LOQ · Windows",
     "protocol": "rdp",
-    "host": "100.124.84.79",
+    "host": "your-windows-box",
     "port": 3389,
     "username": "your-windows-user",
-    "password": "set-me",
+    "password": "",
     "monitors": "multimon",
     "presence": { "intervalMs": 5000 }
   }
