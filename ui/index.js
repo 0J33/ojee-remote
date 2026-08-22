@@ -217,7 +217,12 @@ async function connectAgent(gen) {
         // black frame at a plausible frame rate — the worst kind of failure.
         if (t === 7) { if (!sameNal(sps, u)) { sps = u; paramsChanged = true; } }
         else if (t === 8) { if (!sameNal(pps, u)) { pps = u; paramsChanged = true; } }
-        else picture.push(u);
+        // 9 is an access-unit delimiter and 12 is filler. Both are legal in
+        // Annex-B and neither belongs in an AVCC sample. Chrome ignores them;
+        // Safari's VideoToolbox decoder is strict and rejects the sample, so
+        // the stream connects, reports a healthy frame rate, and decodes
+        // nothing. The encoder here emits an AUD ahead of every keyframe.
+        else if (t !== 9 && t !== 12) picture.push(u);
       }
 
       if ((paramsChanged || !avcc) && sps && pps) {
@@ -299,12 +304,20 @@ async function configureDecoder(codec, w, h, gen, avcc = null) {
     optimizeForLatency: true,
     ...(avcc?.description ? { description: avcc.description } : {}),
   };
-  const support = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }));
+  // Try the full config, then without optimizeForLatency: it is a hint, and a
+  // browser refusing the hint should not cost us the whole stream.
+  let chosen = config;
+  let support = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }));
+  if (!support.supported) {
+    const { optimizeForLatency: _drop, ...plain } = config;
+    const alt = await VideoDecoder.isConfigSupported(plain).catch(() => ({ supported: false }));
+    if (alt.supported) { chosen = plain; support = alt; }
+  }
   if (gen !== reconnect.generation) return;
 
   if (!support.supported) {
     setState('unsupported', 'This browser cannot decode the stream',
-      `${codec} at ${frameW}×${frameH} is not supported here`);
+      `${chosen.codec} at ${frameW}×${frameH} is not supported here`);
     return;
   }
 
@@ -330,7 +343,7 @@ async function configureDecoder(codec, w, h, gen, avcc = null) {
       }
     },
   });
-  decoder.configure(config);
+  decoder.configure(chosen);
   applyTransform();
 }
 
