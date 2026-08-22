@@ -813,11 +813,8 @@ function renderControls() {
       </div>
     </div>
     <div class="rd-group">
-      <span class="label">Keys</span>
-      <div class="segctl">
-        <button id="rd-kbd-toggle" aria-pressed="false"
-                title="Show the on-screen keyboard">KEYBOARD</button>
-      </div>
+      <button class="btn btn--sm" id="rd-kbd-toggle" type="button" aria-pressed="false"
+              title="Show the on-screen keyboard and modifier strip">KEYBOARD</button>
     </div>`;
 
   renderDevices();

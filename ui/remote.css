@@ -230,7 +230,23 @@
   background: var(--accent-08);
 }
 
-#rd-kbd-toggle.on { border-color: var(--accent); color: var(--accent); background: var(--accent-08); }
+/* A lone toggle must not live in a .segctl: that control renders every
+   unselected segment in --ink-2, so a one-button group always looks greyed
+   out — indistinguishable from disabled, next to a FIT/1:1 pair where one
+   IS highlighted. It is a button, and it states its own on/off. */
+#rd-kbd-toggle.on {
+  border-color: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent);
+}
+#rd-kbd-toggle::before {
+  content: '';
+  width: 7px; height: 7px; flex: none;
+  margin-right: 7px;
+  background: var(--dim);
+  transition: var(--t);
+}
+#rd-kbd-toggle.on::before { background: var(--on-accent); }
 
 @media (max-width: 860px) {
   /* The strip and the OS keyboard both eat vertical space; give the stage
