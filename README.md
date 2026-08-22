@@ -181,3 +181,27 @@ untouched throughout, and the encoder stopping when nobody is watching.
 ## Licence
 
 MIT.
+
+## Typing from a phone
+
+Tap **KEYBOARD** in the controls bar to raise your phone's on-screen keyboard.
+
+This needs more than it sounds like. A phone only shows its keyboard when a
+real text field takes focus, and this screen had none — the stage is a canvas,
+and tapping it sends a remote click. So the module carries an invisible (but
+genuinely focusable) `<textarea>`: focusing it is what raises the keyboard,
+everything typed into it is translated and forwarded, and its value is cleared
+on every keystroke so it never accumulates.
+
+Soft keyboards also cannot be read the way a physical one can. Android reports
+`KeyboardEvent.code` as `Unidentified` and `keyCode` as 229 for every letter,
+so key events alone tell you nothing — the text has to be read from
+`beforeinput` and mapped back to keycodes. Both paths are wired at once, so a
+phone with a Bluetooth keyboard attached still works normally.
+
+The strip above the keyboard carries what no phone keyboard offers: Ctrl, Alt,
+Shift, Super, Esc, Tab, arrows and Delete. The modifiers **latch** — you cannot
+hold Ctrl and tap C at the same time on a touchscreen — and release themselves
+after the next key, so Ctrl+C is one gesture rather than a mode you have to
+remember to leave.
+

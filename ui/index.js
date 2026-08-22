@@ -526,22 +526,181 @@ const LINUX_KEY = {
   ControlRight: 97, AltRight: 100, MetaLeft: 125, MetaRight: 126,
 };
 
+// X11 keysyms for the RDP transport. guacd speaks keysyms, the agent speaks
+// Linux keycodes, and the two are unrelated numbering schemes — so a key press
+// has to be translated per transport rather than sent as one number.
+//
+// Printable ASCII keysyms ARE the character code, which is why only the
+// non-printable keys need a table.
+const KEYSYM = {
+  Escape: 0xff1b, Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d,
+  ControlLeft: 0xffe3, ControlRight: 0xffe4, ShiftLeft: 0xffe1, ShiftRight: 0xffe2,
+  AltLeft: 0xffe9, AltRight: 0xffea, MetaLeft: 0xffeb, MetaRight: 0xffec,
+  CapsLock: 0xffe5, Space: 0x20,
+  Home: 0xff50, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53,
+  ArrowDown: 0xff54, PageUp: 0xff55, PageDown: 0xff56, End: 0xff57,
+  Insert: 0xff63, Delete: 0xffff,
+  F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1, F5: 0xffc2, F6: 0xffc3,
+  F7: 0xffc4, F8: 0xffc5, F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
+};
+
+// character → [linux keycode, needs shift], built from a US layout rather
+// than written out by hand. Needed because SOFT keyboards do not report a
+// usable KeyboardEvent.code: Android reports `Unidentified` and keyCode 229
+// for every letter, so a phone can only be understood through the text it
+// inserts, not through its key events.
+const CHAR_KEY = (() => {
+  const map = {};
+  const rows = [
+    ['`1234567890-=', '~!@#$%^&*()_+', [41, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]],
+    ['qwertyuiop[]\\', 'QWERTYUIOP{}|', [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 43]],
+    ["asdfghjkl;'", 'ASDFGHJKL:"', [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]],
+    ['zxcvbnm,./', 'ZXCVBNM<>?', [44, 45, 46, 47, 48, 49, 50, 51, 52, 53]],
+  ];
+  for (const [plain, shifted, codes] of rows) {
+    [...plain].forEach((ch, i) => { map[ch] = [codes[i], false]; });
+    [...shifted].forEach((ch, i) => { map[ch] = [codes[i], true]; });
+  }
+  map[' '] = [57, false];
+  return map;
+})();
+
+const SHIFT_CODE = 42;
+
+/** One key press or release, translated for whichever transport is live. */
+function pressCode(code, keysym, down) {
+  if (state !== 'connected' || !active) return;
+  if (active.transport === 'agent') {
+    if (code != null) send({ t: 'key', code, down });
+  } else if (guac && keysym != null) {
+    // The RDP transport had NO keyboard path at all — onKeyDown only ever
+    // reached the agent's websocket, so typing at a Windows device did
+    // nothing, on a phone and on a desktop alike.
+    guac.sendKeyEvent(down ? 1 : 0, keysym);
+  }
+}
+
+/** Type one character, synthesising the shift press the layout requires. */
+function typeChar(ch) {
+  if (active?.transport === 'agent') {
+    const entry = CHAR_KEY[ch];
+    if (!entry) return;
+    const [code, shift] = entry;
+    if (shift) pressCode(SHIFT_CODE, null, true);
+    pressCode(code, null, true);
+    pressCode(code, null, false);
+    if (shift) pressCode(SHIFT_CODE, null, false);
+  } else {
+    // Printable ASCII keysym === the character code, and guacd applies the
+    // shift state itself, so no synthetic modifier is needed here.
+    const sym = ch.codePointAt(0);
+    pressCode(null, sym, true);
+    pressCode(null, sym, false);
+  }
+}
+
 function onKeyDown(e) {
   if (state !== 'connected' || !active) return;
   // Let the browser keep its own clipboard shortcuts.
   if ((e.metaKey || e.ctrlKey) && ['c', 'v', 'x'].includes(e.key.toLowerCase())) return;
   const code = LINUX_KEY[e.code];
-  if (code == null) return;
+  const keysym = KEYSYM[e.code]
+    ?? (e.key.length === 1 ? e.key.codePointAt(0) : null);
+  if (code == null && keysym == null) return;
   e.preventDefault();
-  send({ t: 'key', code, down: true });
+  pressCode(code, keysym, true);
 }
 
 function onKeyUp(e) {
   if (state !== 'connected' || !active) return;
   const code = LINUX_KEY[e.code];
-  if (code == null) return;
+  const keysym = KEYSYM[e.code]
+    ?? (e.key.length === 1 ? e.key.codePointAt(0) : null);
+  if (code == null && keysym == null) return;
   e.preventDefault();
-  send({ t: 'key', code, down: false });
+  pressCode(code, keysym, false);
+}
+
+/* ── soft keyboard ────────────────────────────────────────────────────── */
+
+// A phone has no physical keyboard, and nothing on this screen was ever
+// focusable-as-a-text-field, so the on-screen keyboard had no reason to
+// appear — there was no way to type at a remote machine from a phone at all.
+//
+// The fix is a real (but invisible) text field. Focusing it is what raises
+// the OS keyboard; everything typed into it is translated and forwarded, and
+// its value is cleared immediately so it never accumulates or reveals what
+// was typed.
+function onBeforeInput(e) {
+  const kbd = root?.querySelector('#rd-kbd');
+  if (kbd) kbd.value = '';
+
+  switch (e.inputType) {
+    case 'insertText':
+    case 'insertCompositionText':
+      for (const ch of e.data || '') typeChar(ch);
+      break;
+    case 'insertLineBreak':
+    case 'insertParagraph':
+      tapKey('Enter');
+      break;
+    case 'deleteContentBackward':
+      tapKey('Backspace');
+      break;
+    case 'deleteContentForward':
+      tapKey('Delete');
+      break;
+    default:
+      break;
+  }
+  e.preventDefault();
+}
+
+/** Press and release one named key — used by the modifier strip and by the
+ *  soft keyboard's Enter/Backspace, which arrive as input events. */
+function tapKey(name) {
+  const code = LINUX_KEY[name];
+  const keysym = KEYSYM[name];
+  pressCode(code, keysym, true);
+  setTimeout(() => pressCode(code, keysym, false), 20);
+}
+
+/** Hold or release a modifier — Ctrl and Alt are latching, because you cannot
+ *  hold a modifier and tap a letter on a touchscreen at the same time. */
+const heldMods = new Set();
+
+function toggleMod(name) {
+  const code = LINUX_KEY[name];
+  const keysym = KEYSYM[name];
+  const held = heldMods.has(name);
+  if (held) {
+    heldMods.delete(name);
+    pressCode(code, keysym, false);
+  } else {
+    heldMods.add(name);
+    pressCode(code, keysym, true);
+  }
+  root?.querySelectorAll(`[data-mod="${name}"]`).forEach((b) => {
+    b.classList.toggle('on', !held);
+    b.setAttribute('aria-pressed', String(!held));
+  });
+}
+
+/** Release every latched modifier — after a letter, so Ctrl+C is one gesture
+ *  rather than a mode you have to remember to leave. */
+function releaseMods() {
+  for (const name of [...heldMods]) toggleMod(name);
+}
+
+function setKeyboard(on) {
+  const kbd = root?.querySelector('#rd-kbd');
+  const bar = root?.querySelector('#rd-keys');
+  if (!kbd) return;
+  if (bar) bar.hidden = !on;
+  root.querySelector('#rd-kbd-toggle')?.setAttribute('aria-pressed', String(on));
+  root.querySelector('#rd-kbd-toggle')?.classList.toggle('on', on);
+  if (on) kbd.focus({ preventScroll: true });
+  else { kbd.blur(); releaseMods(); }
 }
 
 /* ── rendering ────────────────────────────────────────────────────────── */
@@ -561,6 +720,26 @@ function shell() {
       <div class="rd-freeze" id="rd-freeze" hidden>
         <img alt=""><span class="rd-freeze-label meta"></span>
       </div>
+      <!-- Real, focusable, and invisible. Focusing THIS is what raises a
+           phone's on-screen keyboard; the stage itself never could.
+           autocorrect/autocapitalize off, or the OS rewrites what you type
+           at a shell prompt. -->
+      <textarea id="rd-kbd" class="rd-kbd" aria-label="Keyboard input for the remote machine"
+                autocomplete="off" autocorrect="off" autocapitalize="off"
+                spellcheck="false" tabindex="-1"></textarea>
+    </div>
+    <div class="rd-keys" id="rd-keys" hidden>
+      <button type="button" class="rd-key" data-mod="ControlLeft" aria-pressed="false">CTRL</button>
+      <button type="button" class="rd-key" data-mod="AltLeft" aria-pressed="false">ALT</button>
+      <button type="button" class="rd-key" data-mod="ShiftLeft" aria-pressed="false">SHIFT</button>
+      <button type="button" class="rd-key" data-mod="MetaLeft" aria-pressed="false">SUPER</button>
+      <button type="button" class="rd-key" data-tap="Escape">ESC</button>
+      <button type="button" class="rd-key" data-tap="Tab">TAB</button>
+      <button type="button" class="rd-key" data-tap="ArrowLeft" aria-label="Left">&larr;</button>
+      <button type="button" class="rd-key" data-tap="ArrowDown" aria-label="Down">&darr;</button>
+      <button type="button" class="rd-key" data-tap="ArrowUp" aria-label="Up">&uarr;</button>
+      <button type="button" class="rd-key" data-tap="ArrowRight" aria-label="Right">&rarr;</button>
+      <button type="button" class="rd-key" data-tap="Delete">DEL</button>
     </div>
     <div class="rd-foot">
       <span class="meta" id="rd-stats"></span>
@@ -632,9 +811,20 @@ function renderControls() {
         <button data-fit="contain" aria-pressed="${fit === 'contain'}">Fit</button>
         <button data-fit="100" aria-pressed="${fit === '100'}">1:1</button>
       </div>
+    </div>
+    <div class="rd-group">
+      <span class="label">Keys</span>
+      <div class="segctl">
+        <button id="rd-kbd-toggle" aria-pressed="false"
+                title="Show the on-screen keyboard">KEYBOARD</button>
+      </div>
     </div>`;
 
   renderDevices();
+  root.querySelector('#rd-kbd-toggle')?.addEventListener('click', () => {
+    const on = root.querySelector('#rd-kbd-toggle').getAttribute('aria-pressed') === 'true';
+    setKeyboard(!on);
+  });
   box.querySelectorAll('[data-monitor]').forEach((b) => b.addEventListener('click', () => {
     if (!b.dataset.monitor) { focused = null; activeMonitor = null; resetView(); applyTransform(); renderControls(); return; }
     switchMonitor(b.dataset.monitor);
@@ -733,6 +923,30 @@ function wireStage() {
 
   stage.addEventListener('keydown', onKeyDown);
   stage.addEventListener('keyup', onKeyUp);
+
+  // The hidden field gets the same handlers: a phone with a Bluetooth
+  // keyboard attached emits real key events into it, while the soft keyboard
+  // only produces input events. Both paths have to work at once.
+  const kbd = root.querySelector('#rd-kbd');
+  kbd.addEventListener('keydown', onKeyDown);
+  kbd.addEventListener('keyup', onKeyUp);
+  kbd.addEventListener('beforeinput', onBeforeInput);
+  // Belt and braces: some Android IMEs skip beforeinput entirely.
+  kbd.addEventListener('input', () => { kbd.value = ''; });
+  kbd.addEventListener('blur', () => setKeyboard(false));
+
+  root.querySelector('#rd-keys').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mod],[data-tap]');
+    if (!b) return;
+    // Never let the strip steal focus, or the OS keyboard closes on every tap.
+    e.preventDefault();
+    if (b.dataset.mod) toggleMod(b.dataset.mod);
+    else { tapKey(b.dataset.tap); releaseMods(); }
+    kbd.focus({ preventScroll: true });
+  });
+  // mousedown/touchstart default is what moves focus; stopping it there is
+  // what keeps the keyboard on screen while you tap CTRL.
+  root.querySelector('#rd-keys').addEventListener('pointerdown', (e) => e.preventDefault());
 
   const onResize = () => applyTransform();
   window.addEventListener('resize', onResize);
