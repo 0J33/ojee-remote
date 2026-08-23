@@ -81,6 +81,19 @@ export class HostAgents {
   }
 
   /**
+   * Ask the agent to discard its saved grant and request a new one.
+   *
+   * A portal grant covers exactly the displays ticked in the dialog, and there
+   * is no API to widen one — so a monitor attached afterwards is visible to
+   * the agent and permanently uncapturable. This is the only way to include
+   * it, and it raises a prompt ON that machine, which is the consent the
+   * portal exists to collect.
+   */
+  async regrant(device) {
+    return this.#call(device, '/regrant', { timeoutMs: 120_000 });
+  }
+
+  /**
    * Ask the agent to make `monitor` primary. Resolves only once the agent has
    * confirmed the compositor applied it — the client can then reconnect
    * knowing the session is rebuilt, rather than guessing on a timer.

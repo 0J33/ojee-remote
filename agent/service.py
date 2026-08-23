@@ -122,6 +122,23 @@ class Agent:
         self.session, self.streams = portal.open_screencast()
         self.refresh_monitors()
 
+    def regrant_portal(self):
+        """Discard the saved grant and ask again, so newly attached monitors
+        can be included.
+
+        This DOES show the portal dialog — that is the point, and it is the
+        only mechanism the portal offers: a grant cannot be widened in place.
+        Tick every display you want reachable, including ones you may unplug
+        and plug back later; the new token then restores that whole set
+        silently from here on.
+        """
+        portal.forget_token()
+        self.reacquire_portal()
+        return {
+            "monitors": self.monitors,
+            "granted": sum(1 for m in self.monitors if m.get("capturable")),
+        }
+
     def reacquire_portal(self):
         """Throw away a dead ScreenCast session and restore a fresh one.
 
@@ -532,6 +549,22 @@ async def http_handler(path, request_headers, agent: Agent):
         agent.refresh_monitors()
         return (HTTPStatus.OK, [("content-type", "application/json")],
                 (json.dumps({"monitors": agent.monitors}) + "\n").encode())
+
+    if path.split("?")[0] == "/regrant":
+        # Deliberately reachable over the network even though it raises a
+        # dialog ON the machine: the whole point is that you are somewhere
+        # else, notice a monitor is unreachable, and need a way to fix it that
+        # does not require walking over. Someone does have to accept the
+        # prompt, which is exactly the consent the portal is there to collect.
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, agent.regrant_portal)
+        except Exception as e:                                   # noqa: BLE001
+            return (HTTPStatus.INTERNAL_SERVER_ERROR,
+                    [("content-type", "application/json")],
+                    (json.dumps({"error": str(e)}) + "\n").encode())
+        return (HTTPStatus.OK, [("content-type", "application/json")],
+                (json.dumps(result) + "\n").encode())
 
     return (HTTPStatus.NOT_FOUND, [("content-type", "application/json")],
             b'{"error":"not_found"}\n')

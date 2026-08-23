@@ -310,6 +310,27 @@ def _request(bus, iface_call, options: dict, timeout_ms: int = 300_000):
     return out["results"]
 
 
+def forget_token() -> bool:
+    """Drop the saved restore_token so the next open_screencast() PROMPTS.
+
+    The grant covers exactly the monitors that were ticked in the dialog. Plug
+    in a display afterwards and it is simply not in the grant — the agent can
+    see it through mutter and cannot capture it, forever, because the restore
+    token keeps silently restoring the OLD selection. There is no portal API
+    to widen an existing grant, so the only way to include a new monitor is to
+    ask again.
+
+    Returns True if a token was actually discarded.
+    """
+    try:
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def open_screencast(multiple: bool = True):
     """Open a persistent capture session.
 

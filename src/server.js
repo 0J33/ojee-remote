@@ -168,6 +168,28 @@ app.get('/api/devices/:id/monitors', async (req, res) => {
 });
 
 /**
+ * Discard the host's saved portal grant and request a new one.
+ *
+ * Needed because a grant covers exactly the displays ticked in the dialog and
+ * cannot be widened: plug in a monitor afterwards and the agent can see it
+ * through the compositor but never capture it. A prompt appears on that
+ * machine — someone has to accept it, which is the point.
+ */
+app.post('/api/devices/:id/regrant', async (req, res) => {
+  const d = devices.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'unknown_device' });
+  if (d.transport !== 'agent') {
+    return res.status(400).json({ error: 'not_agent_backed',
+      detail: 'only agent-backed devices have a portal grant' });
+  }
+  try {
+    res.json(await agents.regrant(d));
+  } catch (e) {
+    res.status(502).json({ error: 'agent_unreachable', detail: e.message });
+  }
+});
+
+/**
  * Switch which monitor is streamed.
  *
  * This does NOT return until the host agent confirms the compositor has

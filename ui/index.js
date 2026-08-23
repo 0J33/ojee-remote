@@ -952,9 +952,24 @@ function renderControls() {
         ${mode === 'multimon' ? `<button data-monitor="" aria-pressed="${!focused}">All</button>` : ''}
         ${monitors.map((m, i) => `
           <button data-monitor="${ctx.esc(m.name)}"
+                  ${m.capturable === false ? 'data-ungranted="1" disabled' : ''}
                   aria-pressed="${(mode === 'multimon' ? focused?.name : activeMonitor) === m.name}"
-                  title="${ctx.esc(m.name)} · ${m.w}×${m.h}">${i + 1}</button>`).join('')}
+                  title="${ctx.esc(m.name)} · ${m.w}×${m.h}${m.capturable === false
+                    ? ' — not in the screen-sharing grant on that machine' : ''}">${i + 1}</button>`).join('')}
       </div>
+    </div>` : '';
+
+  // A display the host can SEE but not capture is not a failure to hide. The
+  // portal grant was given for a different set of monitors — this one was
+  // attached afterwards — and a grant cannot be widened in place. Saying so,
+  // with the one action that fixes it, beats a chip that silently does nothing.
+  const ungranted = monitors.filter((m) => m.capturable === false);
+  const regrant = ungranted.length && active?.transport === 'agent' ? `
+    <div class="rd-group">
+      <span class="meta">${ungranted.length} screen${ungranted.length > 1 ? 's' : ''} not shared:
+        ${ungranted.map((m) => ctx.esc(m.name)).join(', ')}</span>
+      <button class="btn btn--sm" id="rd-regrant" type="button"
+              title="Ask the host to share its screens again, including new ones">RE-SHARE</button>
     </div>` : '';
 
   box.innerHTML = `
@@ -963,6 +978,7 @@ function renderControls() {
       <div class="rd-devices" id="rd-devices"></div>
     </div>
     ${chips}
+    ${regrant}
     <div class="rd-group">
       <span class="label">Fit</span>
       <div class="segctl">
@@ -980,6 +996,25 @@ function renderControls() {
     const on = root.querySelector('#rd-kbd-toggle').getAttribute('aria-pressed') === 'true';
     setKeyboard(!on);
   });
+  box.querySelector('#rd-regrant')?.addEventListener('click', async () => {
+    const btn = box.querySelector('#rd-regrant');
+    btn.disabled = true;
+    btn.textContent = 'ACCEPT ON THAT MACHINE…';
+    // The dialog appears on the HOST, so say where to look — from here it
+    // otherwise reads as a button that hung.
+    ctx.toast('info', 'Approve the prompt',
+      `A screen-sharing dialog is waiting on ${active?.name || 'that machine'}.`);
+    try {
+      await ctx.api(`/devices/${encodeURIComponent(active.id)}/regrant`, { method: 'POST' });
+      monitors = await loadMonitors();
+      ctx.toast('ok', 'Screens re-shared', 'Every ticked display is reachable now.');
+    } catch (e) {
+      ctx.toast('err', 'Re-share failed', e.message);
+    } finally {
+      renderControls();
+    }
+  });
+
   box.querySelectorAll('[data-monitor]').forEach((b) => b.addEventListener('click', () => {
     if (!b.dataset.monitor) { focused = null; activeMonitor = null; resetView(); applyTransform(); renderControls(); return; }
     switchMonitor(b.dataset.monitor);

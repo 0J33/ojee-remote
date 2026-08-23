@@ -254,3 +254,11 @@
   .rd:has(.rd-keys:not([hidden])) { height: calc(100dvh - 320px); max-height: calc(100dvh - 320px); }
   .rd-key { min-width: 44px; font-size: 0.58rem; padding: 8px 6px; }
 }
+
+/* A monitor the host can see but has no grant for. Disabled AND labelled —
+   the RE-SHARE row next to it says which ones and why, so this is never
+   colour-or-state alone. */
+.rd-group .segctl button[data-ungranted="1"] {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
