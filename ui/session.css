@@ -1,0 +1,185 @@
+/* ============================================================
+   ojee-remote — the fullscreen session.
+
+   A port of rdp.ojee.net's stylesheet onto the design system:
+   same layout and behaviour, ojee-ui tokens and zero radius
+   instead of the old warm palette and rounded corners.
+
+   The structure is deliberately unchanged. A full-bleed screen
+   with two dismissable floating overlays is what made the
+   original usable on a phone — the desktop gets the whole
+   viewport, and the controls sit on top of it rather than
+   stealing space from it.
+   ============================================================ */
+
+.rs { position: fixed; inset: 0; z-index: var(--z-modal); background: var(--bg-0); }
+
+/* The remote screen owns the viewport. 100dvh, not 100vh: on iOS the latter
+   is the *largest* viewport and leaves the bottom strip under the browser UI. */
+.rs-screen {
+  position: absolute; inset: 0;
+  overflow: hidden;
+  background: var(--bg-0);
+  /* The session owns its own gestures; browser pan/zoom on top of a trackpad
+     surface fights every drag. */
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  cursor: crosshair;
+}
+.rs-screen canvas { display: block; }
+.rs-screen:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---------- floating overlays ---------- */
+.rs-hud {
+  position: fixed;
+  left: max(10px, calc(env(safe-area-inset-left, 0px) + 10px));
+  right: max(10px, calc(env(safe-area-inset-right, 0px) + 10px));
+  max-width: 920px;
+  margin-inline: auto;
+  background: var(--chrome-surface);
+  border: 1px solid var(--line-strong);
+  -webkit-backdrop-filter: var(--chrome-blur);
+  backdrop-filter: var(--chrome-blur);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  z-index: 10;
+}
+.rs-hud--top {
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  padding: 6px 8px;
+  display: flex; align-items: center; gap: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+.rs-hud--bottom {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
+  padding: 8px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.45);
+}
+/* Hidden means gone, not merely transparent — a pointer-events:none overlay
+   still steals the top of the screen from the trackpad if it is laid out. */
+.rs-hud--top.hidden { transform: translateY(calc(-100% - 30px)); opacity: 0; pointer-events: none; }
+.rs-hud--bottom.hidden { transform: translateY(calc(100% + 30px)); opacity: 0; pointer-events: none; }
+
+.rs-hud-main { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
+.rs-hud-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+
+.rs-status {
+  font-family: var(--mono); font-size: 0.62rem;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--dim); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 30ch;
+}
+.rs-status.ok  { color: var(--accent); }
+.rs-status.err { color: var(--err); }
+
+.rs-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rs-label {
+  font-family: var(--hud); font-size: 0.55rem;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
+}
+.rs-chips { display: flex; gap: 2px; flex-wrap: wrap; }
+
+/* ---------- chips ---------- */
+/* 34px, not 44: this bar carries 13 keys plus F-keys plus modifiers, and at
+   44 they do not fit a phone at all. They are dense by necessity, spaced 2px,
+   and the trackpad — not these — is the primary input. */
+.rs-chip {
+  min-height: 34px; min-width: 34px;
+  padding: 0 9px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer; transition: var(--t);
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+}
+.rs-chip:hover { border-color: var(--line-hover); color: var(--ink); background: var(--accent-03); }
+.rs-chip:active { background: var(--accent-08); }
+.rs-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rs-chip.on { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
+.rs-chip[disabled], .rs-chip[data-offline="1"] { opacity: 0.45; cursor: not-allowed; }
+
+/* Modifiers are tri-state and each state must be distinguishable WITHOUT
+   colour: armed carries a dashed edge, locked is filled. */
+.rs-mod.armed {
+  border-style: dashed;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-08);
+}
+.rs-chip--warn { border-color: var(--warn); color: var(--warn); }
+.rs-chip--warn:hover { background: var(--warn); color: var(--on-accent); }
+.rs-chip--kbd { border-color: var(--accent); color: var(--accent); }
+
+.rs-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  cursor: pointer; transition: var(--t);
+}
+.rs-icon:hover { border-color: var(--line-hover); color: var(--ink); }
+.rs-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rs-icon--danger:hover { border-color: var(--err); color: var(--err); background: var(--err-wash); }
+
+/* ---------- bottom rows ---------- */
+.rs-row { display: flex; gap: 2px; }
+.rs-keys { flex-wrap: wrap; }
+.rs-actions { gap: var(--s-2); flex-wrap: wrap; }
+
+.rs-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rs-cell-label {
+  font-family: var(--hud); font-size: 0.55rem;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
+}
+.rs-cell-body { display: flex; gap: 2px; flex-wrap: wrap; }
+
+/* F-keys live behind a disclosure: twelve more chips permanently on screen
+   would push the trackpad area off a phone. */
+.rs-details { position: relative; }
+.rs-details > summary { list-style: none; display: inline-flex; align-items: center; }
+.rs-details > summary::-webkit-details-marker { display: none; }
+.rs-fkeys {
+  position: absolute; bottom: calc(100% + 4px); left: 0;
+  padding: 4px;
+  background: var(--chrome-3);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  width: max-content; max-width: 88vw;
+}
+
+/* ---------- reveal ---------- */
+.rs-reveal {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: 50%; transform: translateX(-50%) translateY(-140%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 30px;
+  background: var(--chrome-surface);
+  border: 1px solid var(--line-strong);
+  -webkit-backdrop-filter: var(--chrome-blur);
+  backdrop-filter: var(--chrome-blur);
+  color: var(--accent);
+  cursor: pointer; z-index: 11;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  opacity: 0; pointer-events: none;
+}
+.rs-reveal.show { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
+
+/* ---------- on-screen keyboard ---------- */
+/* When the OSK opens the visual viewport shrinks; the screen is resized to fit
+   above it (see session.js) and the HUD slides away, because the keyboard is
+   the only control that matters at that moment. */
+body.keyboard-open .rs-hud--bottom { transform: translateY(calc(100% + 30px)); opacity: 0; pointer-events: none; }
+
+@media (max-width: 700px) {
+  .rs-status { max-width: 16ch; }
+  .rs-chip { padding: 0 7px; font-size: 0.62rem; }
+  .rs-hud--top { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rs-hud, .rs-reveal { transition: none; }
+}
