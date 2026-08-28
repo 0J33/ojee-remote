@@ -141,16 +141,42 @@ async function connect() {
   const gen = ++reconnect.generation;
   setState('connecting', `Connecting to ${active.name}…`);
 
-  if (active.transport === 'agent') return connectAgent(gen);
-  return connectRdp(gen);
+  // Canvas-2D path when this browser cannot run the H.264 one, or when the
+  // user has chosen it. The original rdp.ojee.net used guacd for everything,
+  // which is exactly why it worked on an iPhone: Guacamole.js paints drawing
+  // instructions onto a canvas, and every browser can do that.
+  if (active.transport === 'agent' && !preferRdp && canDecodeH264()) return connectAgent(gen);
+  if (active.hasFallback || active.transport !== 'agent') return connectRdp(gen);
+  return connectAgent(gen);
 }
 
 /* ── agent transport (Linux, portal capture) ──────────────────────────── */
 
+/**
+ * Can this browser actually play the H.264 stream?
+ *
+ * `'VideoDecoder' in window` is necessary and NOT sufficient: iOS Safari ships
+ * the constructor and then decodes nothing here, which is worse than not
+ * having it — the stream connects, reports a healthy frame rate, and paints a
+ * black canvas. Treating iOS as unable is a blunt test, but a blunt test that
+ * lands on the working transport beats a precise one that lands on a black
+ * screen.
+ */
+function canDecodeH264() {
+  if (!('VideoDecoder' in window)) return false;
+  const ua = navigator.userAgent;
+  const iOS = /iPad|iPhone|iPod/.test(ua)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (iOS) return false;
+  return true;
+}
+
+/** Set when a decode failure forces the canvas path for the rest of the session. */
+let preferRdp = false;
+
 async function connectAgent(gen) {
   if (!('VideoDecoder' in window)) {
-    // Safari < 16.4, Firefox without the flag. Say which browser feature is
-    // missing rather than showing a dead black rectangle.
+    if (active?.hasFallback) { preferRdp = true; return connectRdp(gen); }
     setState('unsupported', 'This browser cannot decode the stream',
       'WebCodecs (VideoDecoder) is required — Safari 16.4+, Chrome 94+');
     return;
@@ -340,6 +366,16 @@ async function configureDecoder(codec, w, h, gen, avcc = null) {
       console.warn('[remote] decoder error:', e.message);
       decodeErrors += 1;
       waitingKey = true;
+      // Three failures is not a blip. If a canvas route exists, take it rather
+      // than sitting on a black rectangle reporting 30fps.
+      if (decodeErrors === 3 && active?.hasFallback && !preferRdp) {
+        preferRdp = true;
+        ctx.toast('info', 'Switching transport',
+          'This browser could not decode the video stream; using the canvas path.');
+        teardown();
+        connectRdp(++reconnect.generation);
+        return;
+      }
       if (decodeErrors === 1 || decodeErrors % 30 === 0) {
         setState('degraded', 'Connected, but nothing decodes',
           `${e.message || 'decoder error'} — ${stats.decoded} frames drawn`);

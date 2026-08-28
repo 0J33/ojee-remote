@@ -127,6 +127,24 @@ export class DeviceRegistry {
         domain: d.domain || '',
         monitors,
         agent: d.agent ? { url: String(d.agent.url).replace(/\/+$/, ''), token: d.agent.token || '' } : null,
+        /**
+         * A second way in, for clients the primary transport cannot serve.
+         *
+         * The agent transport is H.264 over WebCodecs — lower latency and
+         * better quality, and iOS Safari will not decode it. guacd streams
+         * drawing instructions that Guacamole.js paints with canvas 2D, which
+         * every browser can do; it is exactly what the original rdp.ojee.net
+         * used and why that worked on a phone. Declaring both lets the client
+         * pick per device rather than the deployment picking for everyone.
+         */
+        fallback: d.fallback ? {
+          protocol: d.fallback.protocol || 'rdp',
+          host: d.fallback.host || d.host,
+          port: Number(d.fallback.port) || 3389,
+          username: d.fallback.username || '',
+          password: d.fallback.password || '',
+          security: d.fallback.security || 'any',
+        } : null,
         presence: { intervalMs: Number(d.presence?.intervalMs) || this.intervalMs },
         // Optional per-device overrides passed through to guacd.
         settings: d.settings || {},
@@ -160,6 +178,11 @@ export class DeviceRegistry {
       protocol: d.protocol,
       monitors: d.monitors,
       hasAgent: !!d.agent?.url,
+      // Whether a canvas-2D route exists for this device. The client needs to
+      // know BEFORE it tries, so a browser that cannot decode H.264 can take
+      // the other path instead of showing a black screen and a frame counter.
+      // A boolean only — the credentials behind it never leave this process.
+      hasFallback: !!d.fallback,
       online: p.online,
       since: p.since,
       latencyMs: p.latencyMs,

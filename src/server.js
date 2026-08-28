@@ -55,7 +55,8 @@ const {
 // guacd is only needed for rdp/vnc devices — the Linux path goes through the
 // host agent instead. A deployment with only agent-backed devices should not
 // be forced to run guacd or invent a key for it.
-const NEEDS_GUACD = () => devices.devices.some((d) => d.transport !== 'agent');
+const NEEDS_GUACD = () => devices.devices.some(
+  (d) => d.transport !== 'agent' || d.fallback);
 
 const devices = new DeviceRegistry({
   file: DEVICES_FILE,
@@ -242,13 +243,31 @@ app.get('/api/devices/:id/token', async (req, res) => {
   const width = Math.min(Number(req.query.width) || 1920, 8192);
   const height = Math.min(Number(req.query.height) || 1080, 8192);
 
-  const settings = d.protocol === 'rdp'
+  // An agent-backed device asked for over guacd means the client cannot use
+  // WebCodecs — iOS Safari being the case that matters — so serve its fallback
+  // rather than refusing. Credentials come from the fallback block; the browser
+  // only ever learns that one exists.
+  const useFallback = d.transport === 'agent' || req.query.transport === 'rdp';
+  const fb = useFallback ? d.fallback : null;
+  if (useFallback && !fb) {
+    return res.status(409).json({
+      error: 'no_fallback',
+      detail: `${d.name} has no rdp/vnc fallback — add a "fallback" block to devices.json`,
+    });
+  }
+  const target = fb
+    ? { protocol: fb.protocol, host: fb.host, port: fb.port,
+        username: fb.username, password: fb.password, domain: '',
+        security: fb.security, monitors: 'single', settings: {} }
+    : d;
+
+  const settings = target.protocol === 'rdp'
     ? {
-        hostname: d.host,
-        port: String(d.port),
-        username: d.username,
-        password: d.password,
-        domain: d.domain,
+        hostname: target.host,
+        port: String(target.port),
+        username: target.username,
+        password: target.password,
+        domain: target.domain,
         // NLA, not "any".
         //
         // gnome-remote-desktop requires CredSSP/NLA and refuses plain TLS with
@@ -263,7 +282,7 @@ app.get('/api/devices/:id/token', async (req, res) => {
         // "kept disconnecting" independently of the monitor-switch bug.
         // Override per device via `settings` if a host needs something else —
         // some Windows configurations want 'tls' or 'rdp'.
-        security: 'nla',
+        security: target.security || 'nla',
         // Both ends present self-signed certificates.
         'ignore-cert': 'true',
         // Lets the session resize cleanly if the server renegotiates rather
@@ -271,21 +290,21 @@ app.get('/api/devices/:id/token', async (req, res) => {
         'resize-method': 'display-update',
         'enable-wallpaper': 'true',
         // Windows can stream every monitor in one session; g-r-d cannot.
-        ...(d.monitors === 'multimon' ? { 'enable-multimon': 'true' } : {}),
-        ...d.settings,
+        ...(target.monitors === 'multimon' ? { 'enable-multimon': 'true' } : {}),
+        ...target.settings,
       }
     : {
-        hostname: d.host,
-        port: String(d.port),
-        password: d.password,
-        ...d.settings,
+        hostname: target.host,
+        port: String(target.port),
+        password: target.password,
+        ...target.settings,
       };
 
   const crypt = new GuacCrypt('AES-256-CBC', GUAC_KEY);
   const token = crypt.encrypt({
-    connection: { type: d.protocol, settings: { ...settings, width: String(width), height: String(height), dpi: '96' } },
+    connection: { type: target.protocol, settings: { ...settings, width: String(width), height: String(height), dpi: '96' } },
   });
-  res.json({ token, protocol: d.protocol, monitors: d.monitors });
+  res.json({ token, protocol: target.protocol, monitors: target.monitors });
 });
 
 /* ── static: module UI + standalone shell ───────────────────────────────── */
