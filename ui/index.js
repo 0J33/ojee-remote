@@ -37,6 +37,9 @@ let root = null;
 
 let devices = [];
 let active = null;
+// false = the chooser is on screen, true = a session shell is mounted. The two
+// are different DOM trees, so every handler needs to know which exists.
+let inSession = false;
 let monitors = [];
 let activeMonitor = null;
 let mode = 'single';
@@ -863,6 +866,41 @@ function setKeyboard(on) {
 
 /* ── rendering ────────────────────────────────────────────────────────── */
 
+/**
+ * The device chooser — what you land on.
+ *
+ * Connecting to whatever happened to be first meant a dual-boot pair, exactly
+ * one of which can be up, gave you a spinner against a machine that is off.
+ * Cards state which machines exist, which is reachable, and why one is not,
+ * and starting a session is then a deliberate act.
+ */
+function chooser() {
+  const cards = devices.map((d, i) => {
+    const on = d.online === true;
+    const why = d.online === false ? (d.error ? `offline · ${d.error}` : 'offline')
+      : d.online === null ? 'checking…'
+      : `online · ${d.latencyMs}ms`;
+    return `
+      <button class="rd-tile${on ? '' : ' rd-tile--off'}" data-pick="${ctx.esc(d.id)}"
+              style="--i:${i}" ${on ? '' : 'aria-disabled="true"'}>
+        <span class="rd-tile-ic">${ctx.icon(d.transport === 'agent' ? 'i-monitor' : 'i-server', 'ic ic--xl')}</span>
+        <span class="rd-tile-name">${ctx.esc(d.name)}</span>
+        <span class="rd-tile-why"><span class="dot ${on ? 'dot--ok' : d.online === null ? 'dot--warn' : ''}"></span>${ctx.esc(why)}</span>
+        <span class="rd-tile-meta">${ctx.esc(d.transport)} · ${ctx.esc(d.monitors)}</span>
+      </button>`;
+  }).join('');
+
+  return `
+  <section class="rd-choose">
+    <header class="rd-choose-head">
+      <h2 class="h2">Devices</h2>
+      <p class="meta">Pick a machine to take over. Offline ones say why.</p>
+    </header>
+    <div class="rd-tiles">${cards || `<div class="empty">${ctx.icon('i-warn', 'ic ic--xl')}
+      <b>No devices configured</b><span>Add one to devices.json on the gateway.</span></div>`}</div>
+  </section>`;
+}
+
 function shell() {
   return `
   <div class="rd">
@@ -900,6 +938,10 @@ function shell() {
       <button type="button" class="rd-key" data-tap="Delete">DEL</button>
     </div>
     <div class="rd-foot">
+      <button class="btn btn--sm btn--ghost" id="rd-exit" type="button"
+              title="Back to devices (Esc)">EXIT</button>
+      <button class="btn btn--sm btn--ghost" id="rd-full" type="button"
+              title="Fullscreen (F)">FULLSCREEN</button>
       <span class="meta" id="rd-stats"></span>
       <span class="meta rd-hint">click to focus · type to send keys</span>
     </div>
@@ -1111,7 +1153,16 @@ function wireStage() {
     touch = null;
   }, { passive: true });
 
-  stage.addEventListener('keydown', onKeyDown);
+  // Esc and F belong to the SESSION, not the remote machine, so they are
+  // intercepted before the key forwarder sees them. Everything else goes
+  // through untouched, including Ctrl and Alt combinations.
+  stage.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); exitFullscreen(); showChooser(); return; }
+    if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault(); toggleFullscreen(); return;
+    }
+    onKeyDown(e);
+  });
   stage.addEventListener('keyup', onKeyUp);
 
   // The hidden field gets the same handlers: a phone with a Bluetooth
@@ -1143,6 +1194,64 @@ function wireStage() {
   ctx.onCleanup(() => window.removeEventListener('resize', onResize));
 }
 
+/* ── screens ──────────────────────────────────────────────────────────── */
+
+function showChooser() {
+  inSession = false;
+  teardown();
+  active = null;
+  root.innerHTML = chooser();
+  root.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', () => {
+    const d = devices.find((x) => x.id === b.dataset.pick);
+    if (!d) return;
+    if (d.online === false) {
+      ctx.toast('warn', `${d.name} is offline`,
+        d.error || 'Nothing is answering on that machine.');
+      return;
+    }
+    enterSession(d.id);
+  }));
+}
+
+/** Swap to the session shell and connect. */
+function enterSession(id) {
+  inSession = true;
+  root.innerHTML = shell();
+  wireStage();
+  renderControls();
+
+  root.querySelector('#rd-exit')?.addEventListener('click', () => {
+    exitFullscreen();
+    showChooser();
+  });
+  root.querySelector('#rd-full')?.addEventListener('click', toggleFullscreen);
+
+  selectDevice(id);
+}
+
+/* Fullscreen is the point of a remote desktop: the far machine should own the
+   screen, not sit in a 900px box under two navigation bars. Esc leaves the
+   session entirely, which is what people expect from a takeover UI. */
+function stageHost() { return root?.querySelector('.rd'); }
+
+function toggleFullscreen() {
+  const el = stageHost();
+  if (!el) return;
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else el.requestFullscreen?.().catch(() => {
+    // iOS Safari has no Element.requestFullscreen. Fall back to a CSS
+    // takeover, which gets the same result inside the page.
+    el.classList.add('rd--faux-full');
+    document.body.classList.add('rd-faux-lock');
+  });
+}
+
+function exitFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  stageHost()?.classList.remove('rd--faux-full');
+  document.body.classList.remove('rd-faux-lock');
+}
+
 /* ── module contract ──────────────────────────────────────────────────── */
 
 export default {
@@ -1169,6 +1278,7 @@ export default {
         devices: ({ devices: next }) => {
           const before = devices.find((d) => d.id === active?.id)?.online;
           devices = next;
+          if (!inSession) { showChooser(); return; }
           renderDevices();
           const now = devices.find((d) => d.id === active?.id)?.online;
           // A machine that finished booting should come back on its own —

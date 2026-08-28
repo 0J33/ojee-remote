@@ -61,6 +61,32 @@ import inject  # noqa: E402
 import pin  # noqa: E402
 import portal  # noqa: E402
 
+def _tailnet_ip(timeout_s: float = 90.0):
+    """Wait for a Tailscale address rather than asking once.
+
+    tailscaled answers nothing for the first seconds after boot, and systemd's
+    After= orders the START of a unit, not its readiness. Asking once loses
+    that race, and losing it meant binding loopback for the life of the
+    process — the agent looked healthy while nothing off the machine could
+    reach it.
+    """
+    deadline = time.monotonic() + timeout_s
+    delay = 0.5
+    while True:
+        try:
+            r = subprocess.run(["tailscale", "ip", "-4"],
+                               capture_output=True, text=True, timeout=5)
+            addr = (r.stdout or "").strip().splitlines()
+            if r.returncode == 0 and addr and addr[0].strip():
+                return addr[0].strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(delay)
+        delay = min(delay * 1.6, 5.0)
+
+
 def _default_bind() -> str:
     """This machine's Tailscale address, or loopback — never 0.0.0.0.
 
@@ -72,15 +98,11 @@ def _default_bind() -> str:
     Falling back to loopback rather than 0.0.0.0 keeps the failure SAFE: with
     Tailscale down the agent starts unreachable instead of starting wide open.
     """
-    try:
-        r = subprocess.run(["tailscale", "ip", "-4"],
-                           capture_output=True, text=True, timeout=5)
-        addr = (r.stdout or "").strip().splitlines()
-        if r.returncode == 0 and addr and addr[0].strip():
-            return addr[0].strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return "127.0.0.1"
+    ip = _tailnet_ip()
+    if ip:
+        return ip
+    sys.exit("no Tailscale address after 90s — refusing to bind loopback "
+             "silently. Set AGENT_BIND to override.")
 
 
 HOST = os.environ.get("AGENT_BIND") or _default_bind()

@@ -262,3 +262,70 @@
   opacity: 0.4;
   text-decoration: line-through;
 }
+
+/* ---------- device chooser ---------- */
+/* Landing here rather than auto-connecting: with a dual-boot pair exactly one
+   of which can be up, connecting to "the first device" showed a spinner
+   against a machine that is switched off. */
+.rd-choose { display: flex; flex-direction: column; gap: var(--s-4); }
+.rd-choose-head { display: flex; flex-direction: column; gap: 4px; }
+
+.rd-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 2px;
+}
+
+.rd-tile {
+  position: relative;
+  display: flex; flex-direction: column; gap: 9px;
+  min-height: 160px; padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  color: var(--ink-2);
+  cursor: pointer; text-align: left;
+  transition: border-color var(--dur), color var(--dur), transform var(--dur);
+  animation: rd-tile-in 300ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+@keyframes rd-tile-in { from { opacity: 0; transform: translateY(10px); } }
+
+.rd-tile:hover, .rd-tile:focus-visible { border-color: var(--accent); color: var(--ink); }
+.rd-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rd-tile:active { transform: scale(0.985); }
+.rd-tile-ic { color: var(--accent); }
+.rd-tile-name {
+  margin-top: auto;
+  font-family: var(--mono); font-size: 0.9rem; font-weight: 900;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink);
+}
+.rd-tile-why { display: flex; align-items: center; gap: 8px; font-size: 0.64rem; color: var(--dim); }
+.rd-tile-meta {
+  position: absolute; top: 16px; right: 16px;
+  font-family: var(--hud); font-size: 0.54rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim);
+}
+/* Offline is dimmed AND struck AND labelled in words — never colour alone.
+   Still focusable: selecting one explains the failure, which beats a dead
+   control that ignores you. */
+.rd-tile--off { opacity: 0.55; }
+.rd-tile--off .rd-tile-ic { color: var(--warn); }
+.rd-tile--off .rd-tile-name { text-decoration: line-through; }
+
+/* ---------- fullscreen ---------- */
+/* The far machine should own the screen, not sit in a 900px box under two
+   navigation bars. Native fullscreen where it exists; a CSS takeover on iOS
+   Safari, which has no Element.requestFullscreen at all. */
+.rd:fullscreen,
+.rd--faux-full {
+  position: fixed; inset: 0; z-index: var(--z-modal);
+  height: 100dvh; max-height: 100dvh;
+  padding: 0; margin: 0;
+  background: var(--bg-0);
+}
+.rd:fullscreen .rd-stage,
+.rd--faux-full .rd-stage { border: 0; }
+.rd--faux-full { padding-top: env(safe-area-inset-top); }
+body.rd-faux-lock { overflow: hidden; }
+
+.rd-foot #rd-exit, .rd-foot #rd-full { flex: none; }
