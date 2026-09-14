@@ -294,7 +294,14 @@ def _request(bus, iface_call, options: dict, timeout_ms: int = 300_000):
 
     timer = GLib.timeout_add(timeout_ms, on_timeout)
     try:
-        iface_call(options)
+        # The portal's option arguments are a{sv}. Handed a plain dict whose
+        # values are all strings - CreateSession's are just the two tokens -
+        # dbus-python infers a{ss} and the call is rejected with "Type of
+        # message (a{ss}) does not match expected type (a{sv})". It only works
+        # when some value happens to be a dbus.UInt32, which made startup fail
+        # intermittently: on the first restart this time, and potentially on
+        # the boot that matters.
+        iface_call(dbus.Dictionary(options, signature="sv"))
         loop.run()
     finally:
         match.remove()
@@ -401,7 +408,8 @@ def open_pipewire_fd(session: str) -> int:
     if not entry:
         raise PortalError("unknown session — call open_screencast() first")
     _bus, sc = entry
-    return sc.OpenPipeWireRemote(session, {}, dbus_interface=SCREEN_CAST).take()
+    return sc.OpenPipeWireRemote(session, dbus.Dictionary({}, signature="sv"),
+                                 dbus_interface=SCREEN_CAST).take()
 
 
 def close_session(session: str | None) -> None:

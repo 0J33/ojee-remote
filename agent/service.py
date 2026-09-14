@@ -109,6 +109,7 @@ HOST = os.environ.get("AGENT_BIND") or _default_bind()
 PORT = int(os.environ.get("AGENT_PORT", "8210"))
 TOKEN = os.environ.get("AGENT_TOKEN", "")
 NAME = os.environ.get("AGENT_NAME", socket.gethostname())
+DESKTOP_FPS = int(os.environ.get("AGENT_DESKTOP_FPS", "24"))
 FPS = int(os.environ.get("AGENT_FPS", "30"))
 
 if not TOKEN:
@@ -118,6 +119,11 @@ if not TOKEN:
 # drop rather than buffer: a queue that grows is latency that never comes back,
 # and the user would rather lose a frame than watch the past.
 MAX_QUEUED_UNITS = 3
+
+# select() this instead of a connector name to stream every captured monitor
+# composited into one frame, laid out as mutter arranges them.
+DESKTOP = "desktop"
+LAYOUT_POLL_S = 3.0
 
 
 class Agent:
@@ -205,21 +211,53 @@ class Agent:
         except Exception:                                  # noqa: BLE001
             self.monitors = []
 
+        # Each portal stream belongs to exactly one monitor. Matching every
+        # monitor independently let two identical 1920x1080 screens both claim
+        # the same stream, so "switching" between them showed the same picture.
+        unused = list(self.streams)
         for m in self.monitors:
             match = next(
-                (s for s in self.streams
-                 if s["x"] == m["x"] and s["y"] == m["y"]
-                 and s["w"] == m["w"] and s["h"] == m["h"]),
+                (st for st in unused
+                 if st["x"] == m["x"] and st["y"] == m["y"]
+                 and st["w"] == m["w"] and st["h"] == m["h"]),
                 None,
             )
-            # Fall back to size alone: a portal stream can report position
-            # (0,0) for a single-monitor grant even when mutter places it
-            # elsewhere.
-            if match is None:
-                match = next((s for s in self.streams
-                              if s["w"] == m["w"] and s["h"] == m["h"]), None)
+            if match:
+                unused.remove(match)
             m["node_id"] = match["node_id"] if match else None
             m["capturable"] = match is not None
+
+        # Fall back to size alone - a portal stream can report position (0,0)
+        # for a single-monitor grant even when mutter places it elsewhere - but
+        # ONLY when that is unambiguous. Two same-size monitors and one stream
+        # cannot be told apart, and guessing is how the wrong screen got shown.
+        for m in [x for x in self.monitors if not x["capturable"]]:
+            streams = [st for st in unused if st["w"] == m["w"] and st["h"] == m["h"]]
+            rivals = [x for x in self.monitors
+                      if not x["capturable"] and x["w"] == m["w"] and x["h"] == m["h"]]
+            if len(streams) == 1 and len(rivals) == 1:
+                unused.remove(streams[0])
+                m["node_id"] = streams[0]["node_id"]
+                m["capturable"] = True
+
+    def layout(self) -> dict:
+        """Monitors in DESKTOP coordinates: relative to the union's top-left,
+        which is also the top-left of the composited desktop stream."""
+        dx, dy, dw, dh = self.desktop_bounds()
+        return {
+            "desktop": {"w": dw, "h": dh},
+            "monitors": [
+                {"name": m["name"], "x": m["x"] - dx, "y": m["y"] - dy,
+                 "w": m["w"], "h": m["h"], "primary": m["primary"],
+                 "transform": m.get("transform", 0),
+                 "capturable": m.get("capturable", False)}
+                for m in self.monitors
+            ],
+        }
+
+    def layout_signature(self):
+        return tuple((m["name"], m["x"], m["y"], m["w"], m["h"], m.get("transform", 0))
+                     for m in self.monitors)
 
     def monitor(self, name):
         return next((m for m in self.monitors if m["name"] == name), None)
@@ -236,7 +274,10 @@ class Agent:
 
     # ── capture ────────────────────────────────────────────────────────
     def select(self, name: str) -> dict:
-        """Encode a different monitor. Rebuilds the pipeline (~200ms)."""
+        """Encode a different monitor, or the whole desktop. Rebuilds the
+        pipeline (~200ms)."""
+        if name == DESKTOP:
+            return self._select_desktop()
         m = self.monitor(name)
         if not m:
             raise ValueError(f"unknown monitor {name!r}")
@@ -276,7 +317,50 @@ class Agent:
             self.stream.start()
             self.active = name
 
-        return {"monitor": name, "w": m["w"], "h": m["h"], "encoder": self.stream.encoder_name}
+        return {"monitor": name, "w": m["w"], "h": m["h"],
+                "encoder": self.stream.encoder_name, **self.layout()}
+
+    def _select_desktop(self) -> dict:
+        """Composite every capturable monitor into one stream."""
+        with self._lock:
+            if self.stream:
+                self.stream.stop()
+                self.stream = None
+            if self.session_stale:
+                self.session_stale = False
+                self.reacquire_portal()
+
+            captured = [m for m in self.monitors if m.get("capturable")]
+            if not captured:
+                raise ValueError("no monitor is in the portal grant - re-share from the host")
+            dx, dy, dw, dh = self.desktop_bounds()
+
+            def build():
+                # One fd PER pipewiresrc: each takes ownership of its own.
+                return [{"fd": portal.open_pipewire_fd(self.session),
+                         "node_id": m["node_id"],
+                         "x": m["x"] - dx, "y": m["y"] - dy,
+                         "w": m["w"], "h": m["h"]} for m in captured]
+            try:
+                sources = build()
+            except Exception as first:                     # noqa: BLE001
+                print(f"[portal] {first}", flush=True)
+                self.reacquire_portal()
+                captured = [m for m in self.monitors if m.get("capturable")]
+                dx, dy, dw, dh = self.desktop_bounds()
+                sources = build()
+
+            self.stream = capture.DesktopStream(
+                sources=sources, bounds=(dx, dy, dw, dh), fps=DESKTOP_FPS,
+                on_unit=self._on_unit, on_error=self._on_capture_error,
+            )
+            self.stream.start()
+            self.active = DESKTOP
+            print(f"[capture] desktop {dw}x{dh} -> {self.stream.out_w}x{self.stream.out_h} "
+                  f"from {len(sources)} monitor(s) via {self.stream.encoder_name}", flush=True)
+
+        return {"monitor": DESKTOP, "w": self.stream.out_w, "h": self.stream.out_h,
+                "encoder": self.stream.encoder_name, **self.layout()}
 
     def _on_capture_error(self, err):
         """GStreamer errors arrive here, from its own thread.
@@ -312,7 +396,15 @@ class Agent:
         return (x0, y0, x1 - x0, y1 - y0)
 
     def point_at(self, fx: float, fy: float):
-        """Map a fraction of the ACTIVE monitor to a fraction of the desktop."""
+        """Map a fraction of the ACTIVE stream to a fraction of the desktop.
+
+        The desktop stream covers the desktop bounds exactly, so its fractions
+        ARE desktop fractions; a single monitor maps through its rectangle."""
+        fx = min(1.0, max(0.0, fx))
+        fy = min(1.0, max(0.0, fy))
+        if self.active == DESKTOP:
+            self.input.move_fraction(fx, fy)
+            return
         m = self.monitor(self.active)
         if not m:
             return
@@ -320,6 +412,58 @@ class Agent:
         gx = (m["x"] + fx * m["w"] - dx) / dw
         gy = (m["y"] + fy * m["h"] - dy) / dh
         self.input.move_fraction(gx, gy)
+
+    # ── hotplug ────────────────────────────────────────────────────────
+    def broadcast(self, msg: dict):
+        """Send a control message to every client, from any thread."""
+        if not self.loop:
+            return
+        payload = json.dumps(msg)
+        def fan():
+            for c in list(self.clients):
+                asyncio.ensure_future(c.ws.send(payload))
+        self.loop.call_soon_threadsafe(fan)
+
+    def watch_layout(self):
+        """Rebuild when monitors are plugged, unplugged, moved or rotated.
+
+        The laptop runs with three screens, two, or just its own panel, and
+        the portal streams carry the geometry they had when the grant was
+        restored - so a changed layout needs a fresh grant restore (silent,
+        same token) before the new positions can be matched."""
+        last = None
+        while True:
+            time.sleep(LAYOUT_POLL_S)
+            try:
+                current = tuple((m["name"], m["x"], m["y"], m["w"], m["h"], m.get("transform", 0))
+                                for m in display.list_monitors())
+            except Exception:                              # noqa: BLE001
+                continue
+            if last is None:
+                last = current
+                continue
+            if current == last:
+                continue
+            last = current
+            print(f"[layout] changed -> {[c[0] for c in current]}", flush=True)
+            try:
+                with self._lock:
+                    active = self.active
+                    if self.stream:
+                        self.stream.stop()
+                        self.stream = None
+                    self.reacquire_portal()
+                if active and self.clients:
+                    info = self.select(active if (active == DESKTOP or self.monitor(active)) else DESKTOP)
+                    self.broadcast({"t": "active", **info})
+                    if self.stream:
+                        self.stream.force_keyframe()
+                else:
+                    self.active = None
+                    self.broadcast({"t": "layout", **self.layout()})
+            except Exception as e:                         # noqa: BLE001
+                print(f"[layout] rebuild failed: {e}", flush=True)
+                self.broadcast({"t": "error", "detail": f"monitor layout changed: {e}"})
 
     # ── teardown ───────────────────────────────────────────────────────
     def shutdown(self):
@@ -479,26 +623,29 @@ async def ws_handler(ws, agent: Agent):
     agent.clients.add(client)
     try:
         if not agent.active:
-            default = agent.default_monitor()
-            if default:
-                await asyncio.get_running_loop().run_in_executor(None, agent.select, default)
+            view = DESKTOP if any(x.get("capturable") for x in agent.monitors) else None
+            if view:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(None, agent.select, view)
+                except Exception as e:                     # noqa: BLE001
+                    print(f"[client] desktop view failed, falling back: {e}", flush=True)
+                    default = agent.default_monitor()
+                    if default:
+                        await asyncio.get_running_loop().run_in_executor(None, agent.select, default)
 
-        m = agent.monitor(agent.active) if agent.active else None
+        m = agent.monitor(agent.active) if agent.active and agent.active != DESKTOP else None
+        st = agent.stream
         await ws.send(json.dumps({
             "t": "ready",
             "name": NAME,
             "codec": "avc1.42E01E",       # baseline 3.0 — decodes everywhere
             "format": "annexb",
             "active": agent.active,
-            "w": m["w"] if m else 0,
-            "h": m["h"] if m else 0,
-            "encoder": agent.stream.encoder_name if agent.stream else None,
-            "monitors": [
-                {"name": x["name"], "w": x["w"], "h": x["h"],
-                 "x": x["x"], "y": x["y"], "primary": x["primary"],
-                 "capturable": x.get("capturable", False)}
-                for x in agent.monitors
-            ],
+            "monitor": agent.active,
+            "w": (st.out_w if agent.active == DESKTOP and st else (m["w"] if m else 0)),
+            "h": (st.out_h if agent.active == DESKTOP and st else (m["h"] if m else 0)),
+            "encoder": st.encoder_name if st else None,
+            **agent.layout(),
         }))
 
         # A newly-attached client cannot decode until an IDR arrives, and the
@@ -613,9 +760,12 @@ async def main():
 
     if pin.PREFERENCE:
         threading.Thread(target=pin.watch, daemon=True).start()
+    threading.Thread(target=agent.watch_layout, daemon=True).start()
 
     print(f"ojee-remote-agent  {NAME}  ws://{HOST}:{PORT}/stream", flush=True)
     print(f"  capture   portal + pipewire ({len(agent.streams)} monitor(s) granted)", flush=True)
+    for st in agent.streams:
+        print(f"    stream  node {st['node_id']}  {st['w']}x{st['h']} @ {st['x']},{st['y']}", flush=True)
     for m in agent.monitors:
         mark = "*" if m["primary"] else " "
         ok = "capturable" if m.get("capturable") else "NOT in grant"

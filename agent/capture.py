@@ -1,4 +1,4 @@
-"""PipeWire capture → H.264, one monitor at a time.
+"""PipeWire capture → H.264: one monitor, or the whole desktop at once.
 
 Sits between portal.py (which owns the grant) and the WebSocket server (which
 ships bytes to the browser).
@@ -27,9 +27,11 @@ Design notes that are not obvious:
   pipeline (a rebuild drops frames and forces a new keyframe — visible as a
   stutter every time the network hiccups).
 
-* **One pipeline at a time.** Only the monitor being watched is encoded.
-  Encoding all three continuously would waste an enormous amount for a UI where
-  you look at one at a time; switching costs one pipeline rebuild (~200ms).
+* **One pipeline at a time.** Either a single monitor (MonitorStream) or the
+  whole desktop composited into one frame (DesktopStream). The desktop stream
+  is what makes the merged canvas possible: the browser gets one picture laid
+  out exactly as mutter arranges the monitors, focusing a monitor is a crop on
+  the client, and the pointer can cross from one screen to the next.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ BITRATE_MAX = 8000
 BITRATE_START = 2500
 
 
-def _encoder_candidates() -> list[tuple[str, str]]:
+def _encoder_candidates(bitrate: int = BITRATE_START) -> list[tuple[str, str]]:
     """Encoders to try, best first, as (name, launch fragment).
 
     Ordered by measured behaviour on the reference machine, not by reputation:
@@ -76,7 +78,7 @@ def _encoder_candidates() -> list[tuple[str, str]]:
     out = []
     if Gst.ElementFactory.find("vaapih264enc"):
         out.append(("vaapih264enc", (
-            f"vaapih264enc name=enc rate-control=cbr bitrate={BITRATE_START} "
+            f"vaapih264enc name=enc rate-control=cbr bitrate={bitrate} "
             f"keyframe-period=60 max-bframes=0"
         )))
     out.append(("x264enc", (
@@ -84,7 +86,7 @@ def _encoder_candidates() -> list[tuple[str, str]]:
         # buffers several frames ahead, which reads as a broken connection
         # rather than as latency.
         "x264enc name=enc tune=zerolatency speed-preset=veryfast "
-        f"bitrate={BITRATE_START} key-int-max=60 bframes=0"
+        f"bitrate={bitrate} key-int-max=60 bframes=0"
     )))
     return out
 
@@ -121,7 +123,7 @@ class MonitorStream:
         software instead of taking the whole service down.
         """
         errors = []
-        for name, enc in _encoder_candidates():
+        for name, enc in _encoder_candidates(self.bitrate):
             try:
                 self._build(name, enc)
                 return
@@ -136,11 +138,9 @@ class MonitorStream:
         # videorate + videoscale before the encoder so the GPU is not asked to
         # encode 4K at 120fps when the client is a phone. `! video/x-raw` caps
         # after each converter are what actually forces the negotiation.
+        head, extra = self._front()
         desc = (
-            f"pipewiresrc fd={self.fd} path={self.node_id} do-timestamp=true keepalive-time=1000 ! "
-            f"videorate ! video/x-raw,framerate={self.fps}/1 ! "
-            f"videoconvert ! videoscale ! "
-            f"video/x-raw,width=[16,{self.max_width}],pixel-aspect-ratio=1/1 ! "
+            f"{head}"
             f"videoconvert ! "
             f"{enc} ! "
             # config-interval=-1 repeats SPS/PPS on every keyframe so a client
@@ -148,6 +148,7 @@ class MonitorStream:
             f"h264parse config-interval=-1 ! "
             f"video/x-h264,stream-format=byte-stream,alignment=au ! "
             f"appsink name=out emit-signals=true sync=false max-buffers=2 drop=true"
+            f"{extra}"
         )
 
         self.pipeline = Gst.parse_launch(desc)
@@ -173,6 +174,17 @@ class MonitorStream:
             raise RuntimeError(detail)
 
         self.started_at = time.monotonic()
+
+    def _front(self) -> tuple[str, str]:
+        """The source half of the pipeline, ending in raw video, plus any
+        extra source chains that feed it (none for a single monitor)."""
+        return (
+            f"pipewiresrc fd={self.fd} path={self.node_id} do-timestamp=true keepalive-time=1000 ! "
+            f"videorate ! video/x-raw,framerate={self.fps}/1 ! "
+            f"videoconvert ! videoscale ! "
+            f"video/x-raw,width=[16,{self.max_width}],pixel-aspect-ratio=1/1 ! ",
+            "",
+        )
 
     def stop(self) -> None:
         if not self.pipeline:
@@ -240,6 +252,73 @@ class MonitorStream:
             "kbps": round(self.bytes * 8 / elapsed / 1000),
             "fps": round(self.units / elapsed, 1),
         }
+
+
+# The merged desktop is capped here. 4920x1920 is refused by the iGPU's H.264
+# encoder outright (verified), and 3840 wide is also what phones decode in
+# hardware; the browser scales the picture back to desktop coordinates anyway.
+DESKTOP_MAX_W = 3840
+DESKTOP_MAX_H = 2160
+DESKTOP_BITRATE_START = 4500
+DESKTOP_BITRATE_MAX = 14000
+
+
+class DesktopStream(MonitorStream):
+    """Every captured monitor composited into one frame, placed where mutter
+    places it, so the browser sees the desk the way the person sitting at it
+    does.
+
+    Each monitor is scaled BEFORE compositing, so the software compositor
+    handles the output size rather than the full 4920x1920 canvas, and every
+    input keeps resending its last frame (keepalive-time) so a monitor that is
+    not changing never stalls the whole picture waiting for a buffer.
+    """
+
+    def __init__(self, *, sources, bounds, on_unit, on_error=None, fps: int = 24):
+        super().__init__(fd=-1, node_id=0, on_unit=on_unit, on_error=on_error, fps=fps)
+        # sources: [{fd, node_id, x, y, w, h}] with x/y relative to bounds
+        self.sources = sources
+        _bx, _by, bw, bh = bounds
+        self.canvas_w, self.canvas_h = int(bw), int(bh)
+        self.scale = min(1.0, DESKTOP_MAX_W / bw, DESKTOP_MAX_H / bh)
+        self.out_w = max(2, int(bw * self.scale) // 2 * 2)
+        self.out_h = max(2, int(bh * self.scale) // 2 * 2)
+        self.bitrate = DESKTOP_BITRATE_START
+
+    def _front(self) -> tuple[str, str]:
+        s = self.scale
+        pads = []
+        chains = []
+        for i, src in enumerate(self.sources):
+            x, y = round(src["x"] * s), round(src["y"] * s)
+            w, h = max(2, round(src["w"] * s)), max(2, round(src["h"] * s))
+            pads.append(f"sink_{i}::xpos={x} sink_{i}::ypos={y} "
+                        f"sink_{i}::width={w} sink_{i}::height={h}")
+            chains.append(
+                f" pipewiresrc fd={src['fd']} path={src['node_id']} do-timestamp=true "
+                f"keepalive-time=100 ! "
+                f"videoconvert ! videoscale ! "
+                f"video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! "
+                f"videorate ! video/x-raw,framerate={self.fps}/1 ! "
+                f"queue max-size-buffers=2 leaky=downstream ! mix.sink_{i}"
+            )
+        head = (
+            f"compositor name=mix background=black ignore-inactive-pads=true "
+            f"{' '.join(pads)} ! "
+            f"video/x-raw,width={self.out_w},height={self.out_h},"
+            f"framerate={self.fps}/1,pixel-aspect-ratio=1/1 ! "
+        )
+        return head, "".join(chains)
+
+    def set_bitrate(self, kbps: int) -> int:
+        """Same live adaptation, with a ceiling that fits a whole desk."""
+        kbps = max(BITRATE_MIN, min(DESKTOP_BITRATE_MAX, int(kbps)))
+        with self._lock:
+            if not self.encoder or kbps == self.bitrate:
+                return self.bitrate
+            self.encoder.set_property("bitrate", kbps)
+            self.bitrate = kbps
+        return kbps
 
 
 class GLibLoop:

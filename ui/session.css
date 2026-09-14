@@ -183,3 +183,24 @@ body.keyboard-open .rs-hud--bottom { transform: translateY(calc(100% + 30px)); o
 @media (prefers-reduced-motion: reduce) {
   .rs-hud, .rs-reveal { transition: none; }
 }
+
+/* ── agent transport ───────────────────────────────────────────────────
+   The view is sized in DESKTOP pixels; the canvas or video stretches the
+   (scaled) stream to fill it, and the session transforms the wrapper. */
+.rd-agent-view { position: absolute; left: 0; top: 0; transform-origin: 0 0; background: #000; }
+.rd-agent-media { display: block; width: 100%; height: 100%; }
+video.rd-agent-media { object-fit: fill; pointer-events: none; }
+#rd-screen { outline: none; cursor: none; }
+.rd-cursor {
+  position: absolute; left: 0; top: 0;
+  width: 16px; height: 24px;
+  pointer-events: none;
+  z-index: 1;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+.rd-cursor svg { display: block; }
+
+/* A monitor that is part of the desk but outside the share: still focusable
+   (so you can see where it is and move the pointer there), visibly not live. */
+.rs-chip.rd-unshared { text-decoration: line-through; opacity: 0.55; }
+.rs-chip.rd-reshare { border-style: dashed; }

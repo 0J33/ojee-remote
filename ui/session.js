@@ -31,6 +31,7 @@
 
 import Guacamole from '../guac-js/guacamole-common.js';
 import { hudMarkup } from './session-hud.js';
+import { connectAgent, canUseWebCodecs, canUseMse } from './agent-transport.js';
 
 /**
  * Mount the fullscreen session into `host` and connect to `deviceId`.
@@ -119,10 +120,102 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     if (!activeDevice) return;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     setStatus(`connecting to ${activeDevice.name}…`);
-    // Everything goes through guacd now. The original branched on protocol
-    // because it also spoke VNC directly; guacd speaks both, and routing one
-    // way removes the transport as a variable.
+    // An agent device streams the whole desktop as H.264 - the only path that
+    // can show every monitor, switch between them without moving the primary
+    // display, and let the pointer cross screens. Decoded by WebCodecs where
+    // that genuinely works, by a <video> through Media Source on iOS, and only
+    // failing both does it drop to guacd, which shows the primary monitor.
+    const forced = new URLSearchParams(location.search).get('rdtransport');
+    if (activeDevice.transport === 'agent' && activeDevice.hasAgent && !agentUnusable) {
+      if (forced !== 'rdp' && forced !== 'mse' && canUseWebCodecs()) return connectAgentSession('webcodecs');
+      if (forced !== 'rdp' && canUseMse()) return connectAgentSession('mse');
+    }
+    if (activeDevice.transport === 'agent' && !activeDevice.hasFallback) {
+      setStatus('this browser cannot decode the stream', 'err');
+      return;
+    }
     return connectRdp();
+  }
+
+  let agentUnusable = false;       // set once this browser proves it cannot decode
+
+  function connectAgentSession(mode) {
+    const url = `${wsProto}//${location.host}${ctx.base}/stream?device=${encodeURIComponent(activeDevice.id)}`;
+    const myGen = ++rdpGeneration;
+    let opened = false;
+    const adapter = connectAgent({
+      url,
+      mode,
+      onOpen: () => { opened = true; },
+      onLayout: (layout) => {
+        if (myGen !== rdpGeneration) return;
+        const shared = layout.monitors.filter((m) => m.capturable).length;
+        const total = layout.monitors.length;
+        const what = layout.active === 'desktop'
+          ? (shared < total ? `desktop · ${shared} of ${total} monitors shared` : 'desktop')
+          : (layout.active || '');
+        setStatus(`connected · ${activeDevice.name}${what ? ' · ' + what : ''}`, 'ok');
+        const firstLayout = !monitors.length;
+        loadMonitors();
+        // A focused monitor that vanished (unplugged) cannot stay focused.
+        if (focusedMonitor && !monitors.some((m) => m.name === focusedMonitor.name)) focusedMonitor = null;
+        else if (focusedMonitor) focusedMonitor = monitors.find((m) => m.name === focusedMonitor.name);
+        if (firstLayout) recenterCursor();
+        clampCursor();
+        applyFitOrFocus();
+      },
+      onClose: (why) => {
+        if (myGen !== rdpGeneration) return;
+        if (userSwitchedDevice) { userSwitchedDevice = false; return; }
+        setStatus(opened ? `reconnecting… (${why})` : `cannot reach the host agent (${why})`, 'err');
+        reconnectTimer = setTimeout(connect, opened ? 1500 : 4000);
+      },
+      onFailure: (detail) => {
+        if (myGen !== rdpGeneration) return;
+        console.warn('[remote] agent transport failed:', detail);
+        // Try the other decode path before giving up on the agent entirely.
+        adapter.disconnect();
+        if (mode === 'webcodecs' && canUseMse()) {
+          setStatus('switching decoder…');
+          connectAgentSession('mse');
+          return;
+        }
+        agentUnusable = true;
+        if (activeDevice.hasFallback) {
+          ctx.toast?.('info', 'Switching transport', 'This browser could not decode the video stream; using the canvas path.');
+          connectRdp();
+        } else {
+          setStatus(`cannot decode the stream: ${detail}`, 'err');
+        }
+      },
+      onError: (detail) => ctx.toast?.('err', 'Remote', detail),
+    });
+
+    screenEl.innerHTML = '';
+    screenEl.appendChild(adapter.el);
+    screenEl.appendChild(cursorEl);
+    client = adapter;
+    drawCursor();
+  }
+
+  // The agent's frames carry no pointer: on an X11 session mutter's screencast
+  // leaves the cursor out even when asked to embed it. guacd drew its own
+  // cursor layer; here the session draws one where the pointer was last SENT
+  // (already clamped onto a real screen), so it never lags the video and a
+  // trackpad user can always see what a tap will hit.
+  const cursorEl = document.createElement('div');
+  cursorEl.className = 'rd-cursor';
+  cursorEl.setAttribute('aria-hidden', 'true');
+  cursorEl.innerHTML = '<svg viewBox="0 0 16 24" width="16" height="24"><path d="M1 1v19.5l4.8-4.6 3.1 7.1 3.2-1.4-3.1-7H15.5z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+
+  function drawCursor() {
+    if (client?.kind !== 'agent') { cursorEl.hidden = true; return; }
+    const b = baseTransform();
+    const s = b.s * viewZoom;
+    const x = b.tx * viewZoom + viewTx + cursorX * s;
+    const y = b.ty * viewZoom + viewTy + cursorY * s;
+    cursorEl.style.transform = `translate(${x}px, ${y}px)`;
+    cursorEl.hidden = false;
   }
 
   /* connectVnc() removed.
@@ -276,7 +369,22 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // ── monitors ──────────────────────────────────────────────────────────
   async function loadMonitors() {
     if (!activeDevice) return;
+    // An agent session already knows the layout: the stream carries it, in
+    // desktop coordinates, and updates it when monitors are plugged or moved.
+    if (client?.kind === 'agent') {
+      const l = client.layout;
+      monitors = l && l.active === 'desktop' ? l.monitors : [];
+      renderMonitorChips();
+      return;
+    }
     monitors = [];
+    // A guacd session to an agent-capable host streams whichever monitor is
+    // primary, and switching would mean moving the primary display - which is
+    // exactly what the agent exists to avoid. No chips rather than chips that fail.
+    if (activeDevice.monitors !== 'primary-switch') {
+      renderMonitorChips();
+      return;
+    }
     // `local` in the original meant "the machine the gateway runs on", which
     // was the only one whose monitors it could enumerate. That job belongs to
     // the host agent now, so the question is whether the device HAS one —
@@ -299,7 +407,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // The original used this to tell an RDP session (one merged framebuffer,
   // monitors switched server-side) from a VNC one (a framebuffer per screen).
   // Every session is the former now.
-  const isRdp = () => true;
+  const isRdp = () => client?.kind === 'rdp';
 
   function renderMonitorChips() {
     monitorsEl.innerHTML = '';
@@ -330,14 +438,44 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     allBtn.onclick = () => focusMonitor(null);
     monitorsEl.appendChild(allBtn);
 
-    monitors.forEach((m, i) => {
+    // Numbered left to right, the way they sit on the desk.
+    const ordered = [...monitors].sort((a, b) => (a.x - b.x) || (a.y - b.y));
+    ordered.forEach((m, i) => {
       const b = document.createElement('button');
-      b.className = 'rs-chip' + (focusedMonitor === m ? ' on' : '');
+      b.className = 'rs-chip' + (focusedMonitor && focusedMonitor.name === m.name ? ' on' : '')
+        + (m.capturable === false ? ' rd-unshared' : '');
       b.textContent = m.primary ? `${i + 1}★` : String(i + 1);
-      b.title = `${m.name}  ${m.w}×${m.h}  @${m.x},${m.y}`;
+      b.title = `${m.name}  ${m.w}×${m.h}  @${m.x},${m.y}`
+        + (m.capturable === false ? '  - not shared: re-share on the host to see it' : '');
+      // An unshared monitor is still part of the desk - the pointer can go
+      // there and focusing it shows where it is - it just renders black.
       b.onclick = () => focusMonitor(m);
       monitorsEl.appendChild(b);
     });
+
+    if (client?.kind === 'agent' && monitors.some((m) => m.capturable === false)) {
+      const r = document.createElement('button');
+      r.className = 'rs-chip rd-reshare';
+      r.textContent = 'Re-share';
+      r.title = 'Ask the host to share every monitor. Someone at the machine has to accept the prompt.';
+      r.onclick = regrant;
+      monitorsEl.appendChild(r);
+    }
+  }
+
+  async function regrant() {
+    setStatus('waiting for the host to accept the share prompt…');
+    ctx.toast?.('info', 'Re-share requested',
+      'A screen-share prompt is open on the host. Tick every monitor there and allow it.');
+    try {
+      await ctx.api(`/devices/${encodeURIComponent(activeDevice.id)}/regrant`, { method: 'POST' });
+      // The agent rebuilds its capture; reconnect so the stream picks it up.
+      client?.disconnect();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, 800);
+    } catch (e) {
+      setStatus(`re-share failed: ${e.message}`, 'err');
+    }
   }
 
   // RDP monitor switch: ask the server to make this monitor GNOME-primary.
@@ -405,6 +543,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       cursorX = Math.floor(d.w / 2);
       cursorY = Math.floor(d.h / 2);
     }
+    clampCursor();
     sendPointer(0);
   }
 
@@ -454,6 +593,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     canvas.style.position = 'absolute';
     canvas.style.left = '0';
     canvas.style.top = '0';
+    drawCursor();
   }
 
   function resetView() {
@@ -462,7 +602,52 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     viewTy = 0;
   }
 
+  // ── where the pointer is allowed to be ──────────────────────────────
+  // The desktop's bounding box has dead space - above and below the landscape
+  // monitors beside the rotated one - that no screen covers. A pointer left
+  // there is invisible and unrecoverable by feel, so it is pulled back onto the
+  // nearest real screen. This is a CLIENT concern: mutter would clamp it too,
+  // but by then the local cursor and the remote one disagree.
+  function monitorAt(x, y) {
+    return monitors.find((m) => x >= m.x && x < m.x + m.w && y >= m.y && y < m.y + m.h) || null;
+  }
+
+  function clampToScreens(x, y) {
+    if (client?.kind !== 'agent' || !monitors.length) {
+      const d = fbDims();
+      return { x: clamp(x, 0, d.w - 1), y: clamp(y, 0, d.h - 1) };
+    }
+    if (monitorAt(x, y)) return { x, y };
+    let best = null, bestD = Infinity;
+    for (const m of monitors) {
+      const cx = clamp(x, m.x, m.x + m.w - 1);
+      const cy = clamp(y, m.y, m.y + m.h - 1);
+      const dist = (cx - x) ** 2 + (cy - y) ** 2;
+      if (dist < bestD) { bestD = dist; best = { x: cx, y: cy }; }
+    }
+    return best || { x, y };
+  }
+
+  function clampCursor() {
+    const p = clampToScreens(cursorX, cursorY);
+    cursorX = p.x; cursorY = p.y;
+  }
+
+  // Dragging off the focused monitor onto a neighbour moves the focus with it,
+  // so a window carried from one screen to the next stays in view.
+  function followFocus() {
+    if (!focusedMonitor || client?.kind !== 'agent') return;
+    const m = monitorAt(cursorX, cursorY);
+    if (m && m.name !== focusedMonitor.name) {
+      focusedMonitor = m;
+      resetView();
+      renderMonitorChips();
+      applyFitOrFocus();
+    }
+  }
+
   // Cursor must stay within the focused monitor (or the full canvas if "All").
+  // Agent sessions use clampToScreens instead: the pointer may cross screens.
   function cursorBounds() {
     if (focusedMonitor) {
       const m = focusedMonitor;
@@ -479,6 +664,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // its own conversion (noVNC's viewport-scale dance lives in connectVnc).
   function sendPointer(mask) {
     client?.sendMouseFb(cursorX, cursorY, mask);
+    drawCursor();
   }
 
   function clickButton(bit) {
@@ -692,9 +878,16 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     }
 
     // Update virtual cursor.
-    const b = cursorBounds();
-    cursorX = clamp(cursorX + dx * SENS, b.minX, b.maxX);
-    cursorY = clamp(cursorY + dy * SENS, b.minY, b.maxY);
+    if (client?.kind === 'agent') {
+      const p = clampToScreens(cursorX + dx * SENS, cursorY + dy * SENS);
+      cursorX = p.x;
+      cursorY = p.y;
+      followFocus();
+    } else {
+      const b = cursorBounds();
+      cursorX = clamp(cursorX + dx * SENS, b.minX, b.maxX);
+      cursorY = clamp(cursorY + dy * SENS, b.minY, b.maxY);
+    }
 
     let mask = 0;
     if (tpState === 'dragging_left')  mask = BTN_LEFT;
@@ -760,6 +953,143 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     tpTwoFingerMode = null;
     tpState = 'idle';
   }, { capture: true });
+
+  // ── desktop mouse and keyboard ──────────────────────────────────────
+  // The trackpad above is for fingers. A real mouse is ABSOLUTE: the pointer
+  // goes where you point, mapped back through the current fit/focus/zoom
+  // transform into desktop pixels. Touch pointer events are left to the
+  // trackpad handlers, which already own them.
+  function screenToFb(clientX, clientY) {
+    const rect = screenEl.getBoundingClientRect();
+    const b = baseTransform();
+    const sc = b.s * viewZoom;
+    const tx = b.tx * viewZoom + viewTx;
+    const ty = b.ty * viewZoom + viewTy;
+    return { x: (clientX - rect.left - tx) / sc, y: (clientY - rect.top - ty) / sc };
+  }
+
+  let mouseMask = 0;
+  let wheelAccum = 0;
+  const BUTTON_BIT = { 0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT };
+
+  function pointFromMouse(e) {
+    const p = screenToFb(e.clientX, e.clientY);
+    const c = clampToScreens(Math.round(p.x), Math.round(p.y));
+    cursorX = c.x;
+    cursorY = c.y;
+  }
+
+  const onPointerMove = (e) => {
+    if (e.pointerType === 'touch' || !client) return;
+    pointFromMouse(e);
+    sendPointer(mouseMask);
+  };
+  const onPointerDown = (e) => {
+    if (e.pointerType === 'touch' || !client || isHudInteractive(e.target)) return;
+    const bit = BUTTON_BIT[e.button];
+    if (!bit) return;
+    e.preventDefault();
+    screenEl.focus({ preventScroll: true });
+    try { screenEl.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+    pointFromMouse(e);
+    syncModifiers(e);
+    mouseMask |= bit;
+    sendPointer(mouseMask);
+  };
+  const onPointerUp = (e) => {
+    if (e.pointerType === 'touch' || !client) return;
+    const bit = BUTTON_BIT[e.button];
+    if (!bit || !(mouseMask & bit)) return;
+    e.preventDefault();
+    pointFromMouse(e);
+    mouseMask &= ~bit;
+    sendPointer(mouseMask);
+  };
+  // Losing capture mid-drag (alt-tab, the window losing focus) must not leave
+  // a button stuck down on the host.
+  const releaseMouse = () => {
+    if (mouseMask) { mouseMask = 0; sendPointer(0); }
+  };
+  const onWheel = (e) => {
+    if (!client || isHudInteractive(e.target)) return;
+    e.preventDefault();
+    const px = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+    wheelAccum += px;
+    // Trackpads send many small deltas; one wheel notch per ~40px of travel.
+    while (wheelAccum <= -40) { sendPointer(mouseMask | 0x08); sendPointer(mouseMask); wheelAccum += 40; }
+    while (wheelAccum >= 40) { sendPointer(mouseMask | 0x10); sendPointer(mouseMask); wheelAccum -= 40; }
+  };
+  const onContextMenu = (e) => { if (screenEl.contains(e.target)) e.preventDefault(); };
+
+  screenEl.addEventListener('pointermove', onPointerMove);
+  screenEl.addEventListener('pointerdown', onPointerDown);
+  screenEl.addEventListener('pointerup', onPointerUp);
+  screenEl.addEventListener('pointercancel', releaseMouse);
+  screenEl.addEventListener('lostpointercapture', (e) => { if (e.pointerType !== 'touch') releaseMouse(); });
+  screenEl.addEventListener('wheel', onWheel, { passive: false });
+  document.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('blur', releaseMouse);
+
+  // Physical keyboard. The on-screen keyboard helper is an <input> and handles
+  // its own events; everything else typed while the session is open goes to the
+  // host. Keysyms for guacd, KeyboardEvent.code for the agent (uinput keycodes).
+  const CODE_KEYSYM = {
+    Escape: 0xff1b, Tab: 0xff09, Enter: 0xff0d, NumpadEnter: 0xff0d, Backspace: 0xff08,
+    Delete: 0xffff, Insert: 0xff63, Home: 0xff50, End: 0xff57, PageUp: 0xff55, PageDown: 0xff56,
+    ArrowUp: 0xff52, ArrowDown: 0xff54, ArrowLeft: 0xff51, ArrowRight: 0xff53,
+    ShiftLeft: 0xffe1, ShiftRight: 0xffe2, ControlLeft: 0xffe3, ControlRight: 0xffe4,
+    AltLeft: 0xffe9, AltRight: 0xffea, MetaLeft: 0xffeb, MetaRight: 0xffec, CapsLock: 0xffe5,
+    F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1, F5: 0xffc2, F6: 0xffc3,
+    F7: 0xffc4, F8: 0xffc5, F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9,
+  };
+  const heldCodes = new Set();
+  const onKey = (down) => (e) => {
+    if (!client) return;
+    const t = e.target;
+    if (t && t.closest && t.closest('input, textarea, select, [contenteditable]')) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    const code = e.code;
+    const keysym = CODE_KEYSYM[code] ?? (e.key && e.key.length === 1 ? e.key.codePointAt(0) : null);
+    if (keysym == null && !code) return;
+    e.preventDefault();
+    const isModifier = MODIFIER_FLAGS.some(([, codes]) => codes.includes(code));
+    if (down && !isModifier) syncModifiers(e);
+    if (down) heldCodes.add(code); else heldCodes.delete(code);
+    client.sendKey(keysym, code, down);
+    if (!down && !isModifier) syncModifiers(e);
+  };
+  // The event's modifier flags are the truth. A modifier pressed before the
+  // page had focus never sent its keydown, and one released while focus was
+  // elsewhere never sent its keyup; either way the host disagrees about Ctrl.
+  const MODIFIER_FLAGS = [
+    ['shiftKey', ['ShiftLeft', 'ShiftRight']],
+    ['ctrlKey', ['ControlLeft', 'ControlRight']],
+    ['altKey', ['AltLeft', 'AltRight']],
+    ['metaKey', ['MetaLeft', 'MetaRight']],
+  ];
+  function syncModifiers(e) {
+    if (!client) return;
+    for (const [flag, codes] of MODIFIER_FLAGS) {
+      const held = codes.filter((c) => heldCodes.has(c));
+      if (e[flag] && !held.length) {
+        heldCodes.add(codes[0]);
+        client.sendKey(CODE_KEYSYM[codes[0]], codes[0], true);
+      } else if (!e[flag] && held.length) {
+        for (const c of held) { heldCodes.delete(c); client.sendKey(CODE_KEYSYM[c], c, false); }
+      }
+    }
+  }
+  const onKeyDown = onKey(true);
+  const onKeyUp = onKey(false);
+  // Keys held when the window loses focus never get their keyup; release them
+  // so the host is not left with Ctrl stuck down.
+  const releaseKeys = () => {
+    for (const code of heldCodes) client?.sendKey(CODE_KEYSYM[code] ?? null, code, false);
+    heldCodes.clear();
+  };
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('keyup', onKeyUp, true);
+  window.addEventListener('blur', releaseKeys);
 
   // ── key send (with modifier wrapping) ─────────────────────────────────
   function withMods(fn) {
@@ -952,6 +1282,14 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   bootSession(deviceId);
 
   return function teardown() {
+    rdpGeneration++;                 // stale close handlers must not reconnect
+    releaseMouse();
+    releaseKeys();
+    document.removeEventListener('contextmenu', onContextMenu);
+    document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('keyup', onKeyUp, true);
+    window.removeEventListener('blur', releaseMouse);
+    window.removeEventListener('blur', releaseKeys);
     try { client?.disconnect(); } catch { /* already gone */ }
     if (reconnectTimer) clearTimeout(reconnectTimer);
     clearHoldRightTimer();
