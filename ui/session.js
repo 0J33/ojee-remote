@@ -21,7 +21,8 @@
    * Ctrl+Alt+Del, the full navigation key row, and F1–F12.
    * Hide/reveal, so the remote screen can own the whole display.
    * visualViewport handling: when the on-screen keyboard opens,
-     the canvas shrinks above it instead of hiding behind it.
+     the view slides up just enough to keep the pointer above it,
+     at the same zoom, and slides back when it closes.
 
    Transport-agnostic by design. `client` is a small interface —
    fbSize, sendMouseFb, sendKey, sendCtrlAltDel, disconnect — so
@@ -80,6 +81,12 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // pixels of the #screen container. viewZoom == 1 && tx/ty == 0 → base view.
   let viewZoom = 1;
   let viewTx = 0, viewTy = 0;
+
+  // On-screen keyboard: how far the view is slid up to keep the pointer above
+  // it, and the screen size the fit was computed for before it opened.
+  let kbdOpen = false;
+  let kbdShift = 0;
+  let frozenView = null;
   const VIEW_ZOOM_MIN = 1;
   const VIEW_ZOOM_MAX = 8;
 
@@ -206,14 +213,13 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   const cursorEl = document.createElement('div');
   cursorEl.className = 'rd-cursor';
   cursorEl.setAttribute('aria-hidden', 'true');
-  cursorEl.innerHTML = '<svg viewBox="0 0 16 24" width="16" height="24"><path d="M1 1v19.5l4.8-4.6 3.1 7.1 3.2-1.4-3.1-7H15.5z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+  cursorEl.innerHTML = '<svg viewBox="0 0 16 24" width="12" height="18"><path d="M1 1v19.5l4.8-4.6 3.1 7.1 3.2-1.4-3.1-7H15.5z" fill="#000" stroke="#fff" stroke-width="1.7" stroke-linejoin="round"/></svg>';
 
   function drawCursor() {
     if (client?.kind !== 'agent') { cursorEl.hidden = true; return; }
-    const b = baseTransform();
-    const s = b.s * viewZoom;
-    const x = b.tx * viewZoom + viewTx + cursorX * s;
-    const y = b.ty * viewZoom + viewTy + cursorY * s;
+    const v = viewTransform();
+    const x = v.tx + cursorX * v.s;
+    const y = v.ty + cursorY * v.s;
     cursorEl.style.transform = `translate(${x}px, ${y}px)`;
     cursorEl.hidden = false;
   }
@@ -550,7 +556,9 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // Base transform: what CSS `translate(...) scale(...)` on the canvas is needed
   // to render the current view mode (fit / 1:1 / focused monitor) at viewZoom=1.
   function baseTransform() {
-    const view = screenEl.getBoundingClientRect();
+    // While the on-screen keyboard is up, fit to the screen as it was before it
+    // opened: the keyboard covers the desk, it does not make the desk smaller.
+    const view = frozenView || screenEl.getBoundingClientRect();
     const d = fbDims();
     if (focusedMonitor) {
       const m = focusedMonitor;
@@ -581,19 +589,63 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     if (rfb) rfb.scaleViewport = false;
     const canvas = client.el;
     if (!canvas) return;
-    const b = baseTransform();
-    // First put the canvas into base position/scale, then apply the user zoom
-    // and pan. Two independent transforms composed left-to-right in CSS matrix
-    // math: T(vtx,vty) · S(vz) · T(b.tx,b.ty) · S(b.s).
-    const s  = b.s * viewZoom;
-    const tx = b.tx * viewZoom + viewTx;
-    const ty = b.ty * viewZoom + viewTy;
+    updateKeyboardShift();
+    const { s, tx, ty } = viewTransform();
     canvas.style.transformOrigin = '0 0';
     canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
     canvas.style.position = 'absolute';
     canvas.style.left = '0';
     canvas.style.top = '0';
     drawCursor();
+  }
+
+  // Base fit/focus, then the user's pinch zoom and pan, then the slide that
+  // keeps the pointer above an open on-screen keyboard. Composed left-to-right:
+  // T(0,-kbdShift) · T(vtx,vty) · S(vz) · T(b.tx,b.ty) · S(b.s).
+  function viewTransform() {
+    const b = baseTransform();
+    return {
+      s: b.s * viewZoom,
+      tx: b.tx * viewZoom + viewTx,
+      ty: b.ty * viewZoom + viewTy - kbdShift,
+    };
+  }
+
+  function setKeyboardOpen(open) {
+    if (open === kbdOpen && !open) return;
+    kbdOpen = open;
+    document.body.classList.toggle('keyboard-open', open);
+    if (!open) {
+      kbdShift = 0;
+      if (document.activeElement?.id !== 'rd-kbd-helper') frozenView = null;
+    }
+    applyFitOrFocus();
+  }
+
+  // The part of the screen the keyboard leaves visible, in screen pixels.
+  function visibleBand() {
+    const vv = window.visualViewport;
+    const h = screenEl.getBoundingClientRect().height;
+    if (!vv || !kbdOpen) return { top: 0, bottom: h };
+    return { top: vv.offsetTop, bottom: Math.min(h, vv.offsetTop + vv.height) };
+  }
+
+  // Slide just enough to bring the pointer into the comfortable part of the
+  // visible band, leaving room below it to see what it is pointing at. A
+  // pointer already in view does not move the picture at all.
+  function updateKeyboardShift() {
+    if (!kbdOpen) { kbdShift = 0; return; }
+    const b = baseTransform();
+    const unshifted = b.ty * viewZoom + viewTy + cursorY * b.s * viewZoom;
+    const band = visibleBand();
+    const h = Math.max(1, band.bottom - band.top);
+    const lo = band.top + h * 0.15;
+    const hi = band.bottom - h * 0.3;
+    const y = unshifted - kbdShift;
+    if (y > hi) kbdShift = unshifted - hi;
+    else if (y < lo) kbdShift = unshifted - lo;
+    // Sliding DOWN is only ever needed to undo a page the browser scrolled up.
+    kbdShift = Math.max(-band.top, kbdShift);
   }
 
   function resetView() {
@@ -664,7 +716,8 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // its own conversion (noVNC's viewport-scale dance lives in connectVnc).
   function sendPointer(mask) {
     client?.sendMouseFb(cursorX, cursorY, mask);
-    drawCursor();
+    if (kbdOpen) applyFitOrFocus();   // may slide the view; redraws the cursor
+    else drawCursor();
   }
 
   function clickButton(bit) {
@@ -694,7 +747,12 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // finger crosses the movement threshold, which also cancels the long-press
   // timer so a slow finger can't accidentally trigger a right click.
 
-  const SENS = 1.7;                  // finger-to-cursor sensitivity multiplier
+  // Finger travel → cursor travel ON SCREEN. A fixed desktop-pixel gain made the
+  // pointer crawl in All mode, where one screen pixel is several desktop pixels,
+  // and jump when pinched in. Dividing by the view scale keeps the pointer under
+  // the same feel at every zoom.
+  const TRACKPAD_GAIN = 1;
+  const trackpadStep = () => TRACKPAD_GAIN / (baseTransform().s * viewZoom);
   const TAP_MAX_MS = 250;            // touch shorter than this with no move → tap
   const HOLD_RIGHT_MS = 500;         // touch held this long with no move → right
   const TAP_DRAG_GAP_MS = 350;       // window after a tap to start tap-and-drag
@@ -878,15 +936,16 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     }
 
     // Update virtual cursor.
+    const step = trackpadStep();
     if (client?.kind === 'agent') {
-      const p = clampToScreens(cursorX + dx * SENS, cursorY + dy * SENS);
+      const p = clampToScreens(cursorX + dx * step, cursorY + dy * step);
       cursorX = p.x;
       cursorY = p.y;
       followFocus();
     } else {
       const b = cursorBounds();
-      cursorX = clamp(cursorX + dx * SENS, b.minX, b.maxX);
-      cursorY = clamp(cursorY + dy * SENS, b.minY, b.maxY);
+      cursorX = clamp(cursorX + dx * step, b.minX, b.maxX);
+      cursorY = clamp(cursorY + dy * step, b.minY, b.maxY);
     }
 
     let mask = 0;
@@ -961,11 +1020,8 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // trackpad handlers, which already own them.
   function screenToFb(clientX, clientY) {
     const rect = screenEl.getBoundingClientRect();
-    const b = baseTransform();
-    const sc = b.s * viewZoom;
-    const tx = b.tx * viewZoom + viewTx;
-    const ty = b.ty * viewZoom + viewTy;
-    return { x: (clientX - rect.left - tx) / sc, y: (clientY - rect.top - ty) / sc };
+    const v = viewTransform();
+    return { x: (clientX - rect.left - v.tx) / v.s, y: (clientY - rect.top - v.ty) / v.s };
   }
 
   let mouseMask = 0;
@@ -1174,10 +1230,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
 
   // ── keyboard helper (on-screen IME on mobile) ─────────────────────────
   root.querySelector('#rd-kbd').onclick = () => {
-    let helper = root.querySelector('#rd-kbd-helper');
+    let helper = document.getElementById('rd-kbd-helper');
     if (!helper) {
       helper = document.createElement('input');
-      helper.id = 'kbd-helper';
+      helper.id = 'rd-kbd-helper';
       helper.autocomplete = 'off';
       helper.autocapitalize = 'off';
       helper.spellcheck = false;
@@ -1197,7 +1253,19 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
           sendKeysym(ks, e.key);
         }
       });
+      helper.addEventListener('blur', () => {
+        // The keyboard is going away (or never came, on a desktop browser).
+        frozenView = null;
+        setKeyboardOpen(false);
+      });
       document.body.appendChild(helper);
+    }
+    // Capture the fit BEFORE the keyboard appears. Where the browser resizes
+    // the layout for the keyboard, the screen is already shorter by the time
+    // the viewport event arrives.
+    if (document.activeElement !== helper) {
+      const r = screenEl.getBoundingClientRect();
+      frozenView = { width: r.width, height: r.height };
     }
     helper.focus();
   };
@@ -1230,29 +1298,23 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   });
 
   // ── mobile on-screen keyboard handling ────────────────────────────────
-  // When the OSK opens, `visualViewport.height` drops below the layout viewport
-  // height. We shrink #screen to that height (so the remote canvas fits above
-  // the keyboard instead of being covered by it) and slide the HUD out of the
-  // way — the physical OSK is the only UI the user needs at that moment.
+  // The keyboard covers the bottom of the screen. The old handling shrank the
+  // screen to the space left and re-fitted into it, which changed the scale
+  // underneath an existing pinch zoom and pan and threw the view somewhere
+  // unrelated. Now the zoom stays exactly where it was and the view only slides
+  // up - as far as needed and no further - to keep the pointer, which is what
+  // you were looking at, clear of the keys. Closing the keyboard slides it back.
   if (window.visualViewport) {
     const vv = window.visualViewport;
+    let closedHeight = vv.height;
     const onVvChange = () => {
-      const kbdOpen = vv.height < window.innerHeight - 100;
-      document.body.classList.toggle('keyboard-open', kbdOpen);
-      if (kbdOpen) {
-        screenEl.style.bottom = 'auto';
-        screenEl.style.height = vv.height + 'px';
-      } else {
-        screenEl.style.bottom = '';
-        screenEl.style.height = '';
-      }
-      // noVNC listens to window "resize" for rescale, not visualViewport events.
-      window.dispatchEvent(new Event('resize'));
+      const typing = document.activeElement?.id === 'rd-kbd-helper';
+      if (!typing) closedHeight = vv.height;       // rotations, browser chrome
+      setKeyboardOpen(typing && vv.height < closedHeight - 80);
     };
     vv.addEventListener('resize', onVvChange);
     vv.addEventListener('scroll', onVvChange);
   }
-
 
   /**
    * Open one device directly.
@@ -1294,7 +1356,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     clearHoldRightTimer();
     clearAwaitingDragTimer();
-    root.querySelector('#rd-kbd-helper')?.remove();
+    document.getElementById('rd-kbd-helper')?.remove();
     document.body.classList.remove('keyboard-open');
   };
 }

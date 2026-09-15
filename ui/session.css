@@ -193,7 +193,7 @@ video.rd-agent-media { object-fit: fill; pointer-events: none; }
 #rd-screen { outline: none; cursor: none; }
 .rd-cursor {
   position: absolute; left: 0; top: 0;
-  width: 16px; height: 24px;
+  width: 12px; height: 18px;
   pointer-events: none;
   z-index: 1;
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
