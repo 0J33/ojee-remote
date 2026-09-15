@@ -49,8 +49,13 @@ being controlled, so it was unreachable in exactly the situations you wanted it:
 booted into the other OS. Each machine is now a source the gateway dials over the tailnet, and a
 dual-boot pair correctly shows exactly one of the two as online.
 
-**Capture** is the portal + PipeWire, encoded with `vaapih264enc` on the Intel iGPU — deliberately
-not the discrete GPU, so streaming never competes with a game or a CUDA job.
+**Capture** is PipeWire, encoded with `vaapih264enc` on the Intel iGPU — deliberately not the
+discrete GPU, so streaming never competes with a game or a CUDA job. On GNOME the frames come from
+mutter's own `org.gnome.Mutter.ScreenCast` API (what the portal calls underneath), which records
+every monitor by connector name with no dialog at all. The portal restores only the exact
+selection it was granted, so plugging or unplugging a monitor put its picker back on the screen —
+behind the lock screen, where nobody can answer it. The portal remains the fallback for desktops
+without mutter (`AGENT_CAPTURE=portal|mutter|auto`).
 
 **Input** is `/dev/uinput`, not the portal. GNOME refuses to persist an input grant
 (`Remote desktop sessions cannot persist`), so the portal would prompt on every single connection.
@@ -70,12 +75,11 @@ how far behind the client is.
 ```bash
 sudo apt install python3-gi python3-dbus gstreamer1.0-vaapi gstreamer1.0-plugins-{good,bad} python3-websockets
 cd agent
-python3 grant.py          # ONCE, sitting at the machine — approve the dialog,
-                          # select every monitor you want reachable
 ```
 
-The grant is saved as a restore token, and every start after that is silent — measured at 0.05 s
-with no dialog. That is what lets it run unattended.
+On GNOME there is nothing to approve: every connected monitor is captured, and a hotplug rebuilds
+the session silently. Elsewhere, run `python3 grant.py` once at the machine and select every
+monitor you want reachable; the grant is saved as a restore token and later starts are silent.
 
 Then run it:
 
@@ -163,7 +167,8 @@ Written down because none of them announce themselves:
 
 | Piece | State |
 |---|---|
-| `agent/portal.py` — persistent multi-monitor grant | done, verified silent |
+| `agent/mutter.py` — every monitor, no grant, silent across hotplug | done, verified |
+| `agent/portal.py` — persistent multi-monitor grant (non-GNOME fallback) | done, verified silent |
 | `agent/capture.py` — PipeWire → H.264, live bitrate, encoder fallback | done, verified |
 | `agent/inject.py` — absolute pointer + keyboard via uinput | done, verified |
 | `agent/pin.py` — primary-display pinning | done, verified restoring |

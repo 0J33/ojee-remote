@@ -58,6 +58,7 @@ from websockets.server import serve  # noqa: E402
 import capture  # noqa: E402
 import display  # noqa: E402
 import inject  # noqa: E402
+import mutter  # noqa: E402
 import pin  # noqa: E402
 import portal  # noqa: E402
 
@@ -125,13 +126,30 @@ MAX_QUEUED_UNITS = 3
 DESKTOP = "desktop"
 LAYOUT_POLL_S = 3.0
 
+# Where frames come from. "mutter" records every monitor by connector with no
+# dialog, so plugging and unplugging never asks anything; "portal" is the
+# consent-dialog path, for desktops without mutter. "auto" waits briefly for
+# mutter at login (gnome-shell may not own its bus name yet) before settling.
+CAPTURE_MODE = os.environ.get("AGENT_CAPTURE", "auto")
+CaptureError = (portal.PortalError, mutter.MutterError)
+
+
+def _capture_backend():
+    if CAPTURE_MODE == "portal":
+        return portal
+    if CAPTURE_MODE == "mutter" or mutter.available(wait_s=20):
+        return mutter
+    print("[capture] mutter ScreenCast not on the bus - using the portal", flush=True)
+    return portal
+
 
 class Agent:
     """Owns the portal session, the encoder and the virtual input device."""
 
     def __init__(self):
-        self.session = None          # portal ScreenCast session handle
-        self.streams = []            # [{node_id,x,y,w,h}] from the portal
+        self.backend = None          # mutter or portal, chosen in main()
+        self.session = None          # ScreenCast session handle
+        self.streams = []            # [{node_id,x,y,w,h,name?}]
         self.monitors = []           # [{name,x,y,w,h,primary}] from mutter
         self.stream = None           # active capture.MonitorStream
         self.active = None           # monitor name being encoded
@@ -140,15 +158,42 @@ class Agent:
         self.clients = set()
         self.loop = None             # asyncio loop, set in main()
         self._lock = threading.Lock()
+        self._rebuilding = threading.Lock()
         # Set when a pipeline reports a stale node id; the next start re-opens
         # the grant instead of reusing a session we know is dead.
         self.session_stale = False
 
     # ── setup ──────────────────────────────────────────────────────────
+    def _open_capture(self):
+        if self.backend is mutter:
+            return mutter.open_screencast(on_closed=self._on_session_closed)
+        return self.backend.open_screencast()
+
     def open_portal(self):
-        """Restore the saved grant. Silent — no dialog — once approved once."""
-        self.session, self.streams = portal.open_screencast()
+        """Start capture. mutter: every monitor, no dialog. portal: restore the
+        saved grant, silent once approved once."""
+        self.session, self.streams = self._open_capture()
         self.refresh_monitors()
+
+    def _on_session_closed(self, session_path):
+        """mutter ended the session on its own - "Stop sharing" in the shell's
+        indicator, or a monitor it was recording went away. This machine is
+        meant to stay reachable, so capture comes straight back.
+
+        Arrives on the GLib thread, which is also the thread that delivers the
+        new session's stream announcements: rebuilding here would wait on
+        itself. Hence the separate thread."""
+        print("[capture] screencast session closed by the compositor", flush=True)
+        self.session_stale = True
+
+        def later():
+            # An unplug closes the session AND changes the layout; the layout
+            # watcher may have rebuilt already, and doing it twice is a second
+            # visible restart for nothing.
+            time.sleep(2.0)
+            if self.session == session_path:
+                self._rebuild("session closed")
+        threading.Thread(target=later, daemon=True).start()
 
     def regrant_portal(self):
         """Discard the saved grant and ask again, so newly attached monitors
@@ -160,8 +205,10 @@ class Agent:
         and plug back later; the new token then restores that whole set
         silently from here on.
         """
-        portal.forget_token()
-        self.reacquire_portal()
+        self.backend.forget_token()
+        # The same path a hotplug takes: stop, reopen, and put viewers back on
+        # their view. Reopening alone left the running stream on dead nodes.
+        self._rebuild("re-share")
         return {
             "monitors": self.monitors,
             "granted": sum(1 for m in self.monitors if m.get("capturable")),
@@ -189,14 +236,14 @@ class Agent:
         prompts if the token itself was invalidated, which is correct, because
         that is the user having genuinely withdrawn consent.
         """
-        print("[portal] session is dead — restoring a fresh grant", flush=True)
+        print("[capture] opening a fresh screencast session", flush=True)
         try:
-            portal.close_session(self.session)
+            self.backend.close_session(self.session)
         except Exception:                                  # noqa: BLE001
             pass                                            # it is already gone
         self.session = None
         self.streams = []
-        self.session, self.streams = portal.open_screencast()
+        self.session, self.streams = self._open_capture()
         self.refresh_monitors()
 
     def refresh_monitors(self):
@@ -216,9 +263,12 @@ class Agent:
         # the same stream, so "switching" between them showed the same picture.
         unused = list(self.streams)
         for m in self.monitors:
-            match = next(
+            # mutter streams are recorded by connector, so the name is exact.
+            match = next((st for st in unused if st.get("name") == m["name"]), None)
+            match = match or next(
                 (st for st in unused
-                 if st["x"] == m["x"] and st["y"] == m["y"]
+                 if not st.get("name")
+                 and st["x"] == m["x"] and st["y"] == m["y"]
                  and st["w"] == m["w"] and st["h"] == m["h"]),
                 None,
             )
@@ -232,7 +282,8 @@ class Agent:
         # ONLY when that is unambiguous. Two same-size monitors and one stream
         # cannot be told apart, and guessing is how the wrong screen got shown.
         for m in [x for x in self.monitors if not x["capturable"]]:
-            streams = [st for st in unused if st["w"] == m["w"] and st["h"] == m["h"]]
+            streams = [st for st in unused
+                       if not st.get("name") and st["w"] == m["w"] and st["h"] == m["h"]]
             rivals = [x for x in self.monitors
                       if not x["capturable"] and x["w"] == m["w"] and x["h"] == m["h"]]
             if len(streams) == 1 and len(rivals) == 1:
@@ -282,7 +333,7 @@ class Agent:
         if not m:
             raise ValueError(f"unknown monitor {name!r}")
         if not m.get("capturable"):
-            raise ValueError(f"{name} was not included in the portal grant")
+            raise ValueError(f"{name} is not being captured")
 
         with self._lock:
             if self.stream:
@@ -302,12 +353,12 @@ class Agent:
             # session that was revoked while nobody was streaming, and the only
             # way to find out is to try. A second failure is real and is raised.
             try:
-                fd = portal.open_pipewire_fd(self.session)
+                fd = self.backend.open_pipewire_fd(self.session)
             except Exception as first:                     # noqa: BLE001
-                print(f"[portal] {first}", flush=True)
+                print(f"[capture] {first}", flush=True)
                 self.reacquire_portal()
                 m = self.monitor(name) or m                # node ids changed
-                fd = portal.open_pipewire_fd(self.session)
+                fd = self.backend.open_pipewire_fd(self.session)
 
             self.stream = capture.MonitorStream(
                 fd=fd, node_id=m["node_id"], fps=FPS,
@@ -332,19 +383,19 @@ class Agent:
 
             captured = [m for m in self.monitors if m.get("capturable")]
             if not captured:
-                raise ValueError("no monitor is in the portal grant - re-share from the host")
+                raise ValueError("no monitor is being captured")
             dx, dy, dw, dh = self.desktop_bounds()
 
             def build():
                 # One fd PER pipewiresrc: each takes ownership of its own.
-                return [{"fd": portal.open_pipewire_fd(self.session),
+                return [{"fd": self.backend.open_pipewire_fd(self.session),
                          "node_id": m["node_id"],
                          "x": m["x"] - dx, "y": m["y"] - dy,
                          "w": m["w"], "h": m["h"]} for m in captured]
             try:
                 sources = build()
             except Exception as first:                     # noqa: BLE001
-                print(f"[portal] {first}", flush=True)
+                print(f"[capture] {first}", flush=True)
                 self.reacquire_portal()
                 captured = [m for m in self.monitors if m.get("capturable")]
                 dx, dy, dw, dh = self.desktop_bounds()
@@ -446,31 +497,48 @@ class Agent:
                 continue
             last = current
             print(f"[layout] changed -> {[c[0] for c in current]}", flush=True)
-            try:
-                with self._lock:
-                    active = self.active
-                    if self.stream:
-                        self.stream.stop()
-                        self.stream = None
-                    self.reacquire_portal()
-                if active and self.clients:
-                    info = self.select(active if (active == DESKTOP or self.monitor(active)) else DESKTOP)
-                    self.broadcast({"t": "active", **info})
-                    if self.stream:
-                        self.stream.force_keyframe()
-                else:
-                    self.active = None
-                    self.broadcast({"t": "layout", **self.layout()})
-            except Exception as e:                         # noqa: BLE001
-                print(f"[layout] rebuild failed: {e}", flush=True)
-                self.broadcast({"t": "error", "detail": f"monitor layout changed: {e}"})
+            self._rebuild("monitor layout changed")
+
+    def _rebuild(self, why: str):
+        """Fresh capture session, then put every viewer back on what they were
+        watching. Retried, because a hotplug settles in steps and the first
+        attempt can land between two of them."""
+        if not self._rebuilding.acquire(blocking=False):
+            return                                         # one is already running
+        try:
+            for attempt in range(5):
+                try:
+                    with self._lock:
+                        active = self.active
+                        if self.stream:
+                            self.stream.stop()
+                            self.stream = None
+                        self.reacquire_portal()
+                        self.session_stale = False
+                    if active and self.clients:
+                        info = self.select(active if (active == DESKTOP or self.monitor(active)) else DESKTOP)
+                        self.broadcast({"t": "active", **info})
+                        if self.stream:
+                            self.stream.force_keyframe()
+                    else:
+                        self.active = None
+                        self.broadcast({"t": "layout", **self.layout()})
+                    return
+                except Exception as e:                     # noqa: BLE001
+                    print(f"[capture] rebuild after {why} failed (attempt {attempt + 1}): {e}",
+                          flush=True)
+                    time.sleep(2 + 2 * attempt)
+            self.broadcast({"t": "error", "detail": f"{why}: capture could not be restarted"})
+        finally:
+            self._rebuilding.release()
 
     # ── teardown ───────────────────────────────────────────────────────
     def shutdown(self):
         if self.stream:
             self.stream.stop()
         self.input.close()
-        portal.close_session(self.session)
+        if self.backend:
+            self.backend.close_session(self.session)
         self.glib.stop()
 
 
@@ -706,10 +774,11 @@ async def http_handler(path, request_headers, agent: Agent):
             "encoder": agent.stream.encoder_name if agent.stream else None,
             # Says plainly that this no longer depends on g-r-d, and therefore
             # never moves the primary display.
-            "capture": "portal-pipewire",
+            "capture": f"{agent.backend.__name__ if agent.backend else 'none'}-pipewire",
         }
         if not body["ok"]:
-            body["reason"] = ("no capturable monitor — the portal grant may be missing; "
+            body["reason"] = ("no capturable monitor" if agent.backend is mutter else
+                              "no capturable monitor — the portal grant may be missing; "
                               "run `python3 agent/grant.py` once at the machine")
         return (HTTPStatus.OK, [("content-type", "application/json")],
                 (json.dumps(body) + "\n").encode())
@@ -749,11 +818,15 @@ async def main():
     except Exception as e:                                 # noqa: BLE001
         print(f"[input] DISABLED — {e}", flush=True)
 
+    agent.backend = _capture_backend()
     try:
         agent.open_portal()
-    except portal.PortalError as e:
-        # Fatal, but say exactly what to do about it. The overwhelmingly likely
-        # cause is that nobody has approved the one-time grant yet.
+    except CaptureError as e:
+        # Fatal; systemd restarts the unit. For the portal, say exactly what to
+        # do about it: the overwhelmingly likely cause is that nobody has
+        # approved the one-time grant yet.
+        if agent.backend is mutter:
+            sys.exit(f"screencast session failed: {e}")
         sys.exit(f"portal session failed: {e}\n"
                  f"Run `python3 {os.path.dirname(os.path.abspath(__file__))}/grant.py` "
                  f"once while sitting at this machine.")
@@ -763,12 +836,12 @@ async def main():
     threading.Thread(target=agent.watch_layout, daemon=True).start()
 
     print(f"ojee-remote-agent  {NAME}  ws://{HOST}:{PORT}/stream", flush=True)
-    print(f"  capture   portal + pipewire ({len(agent.streams)} monitor(s) granted)", flush=True)
+    print(f"  capture   {agent.backend.__name__} + pipewire ({len(agent.streams)} monitor(s))", flush=True)
     for st in agent.streams:
         print(f"    stream  node {st['node_id']}  {st['w']}x{st['h']} @ {st['x']},{st['y']}", flush=True)
     for m in agent.monitors:
         mark = "*" if m["primary"] else " "
-        ok = "capturable" if m.get("capturable") else "NOT in grant"
+        ok = "capturable" if m.get("capturable") else "NOT captured"
         print(f"    {mark} {m['name']:<8} {m['w']}x{m['h']} @ {m['x']},{m['y']}  {ok}", flush=True)
     if pin.PREFERENCE:
         print(f"  primary   pinned to {' > '.join(pin.PREFERENCE)}", flush=True)

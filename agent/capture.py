@@ -179,7 +179,7 @@ class MonitorStream:
         """The source half of the pipeline, ending in raw video, plus any
         extra source chains that feed it (none for a single monitor)."""
         return (
-            f"pipewiresrc fd={self.fd} path={self.node_id} do-timestamp=true keepalive-time=1000 ! "
+            f"pipewiresrc {_pw_target(self.fd, self.node_id)} do-timestamp=true keepalive-time=1000 ! "
             f"videorate ! video/x-raw,framerate={self.fps}/1 ! "
             f"videoconvert ! videoscale ! "
             f"video/x-raw,width=[16,{self.max_width}],pixel-aspect-ratio=1/1 ! ",
@@ -295,7 +295,7 @@ class DesktopStream(MonitorStream):
             pads.append(f"sink_{i}::xpos={x} sink_{i}::ypos={y} "
                         f"sink_{i}::width={w} sink_{i}::height={h}")
             chains.append(
-                f" pipewiresrc fd={src['fd']} path={src['node_id']} do-timestamp=true "
+                f" pipewiresrc {_pw_target(src['fd'], src['node_id'])} do-timestamp=true "
                 f"keepalive-time=100 ! "
                 f"videoconvert ! videoscale ! "
                 f"video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! "
@@ -319,6 +319,13 @@ class DesktopStream(MonitorStream):
             self.encoder.set_property("bitrate", kbps)
             self.bitrate = kbps
         return kbps
+
+
+def _pw_target(fd, node_id) -> str:
+    """pipewiresrc's connection. A portal hands over a restricted remote as an
+    fd; mutter's own nodes sit on the user's default PipeWire daemon, reached
+    with no fd at all."""
+    return f"fd={fd} path={node_id}" if fd is not None and fd >= 0 else f"path={node_id}"
 
 
 class GLibLoop:
