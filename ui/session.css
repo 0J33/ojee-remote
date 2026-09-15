@@ -170,8 +170,8 @@
 .rs-reveal.show { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
 
 /* ---------- on-screen keyboard ---------- */
-/* When the OSK opens the visual viewport shrinks; the screen is resized to fit
-   above it (see session.js) and the HUD slides away, because the keyboard is
+/* When the OSK opens the view slides up to keep the pointer above it, at the
+   same zoom (see session.js), and the HUD slides away, because the keyboard is
    the only control that matters at that moment. */
 body.keyboard-open .rs-hud--bottom { transform: translateY(calc(100% + 30px)); opacity: 0; pointer-events: none; }
 
