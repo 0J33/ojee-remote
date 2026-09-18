@@ -89,7 +89,8 @@ const MANIFEST = {
   views: [{ id: 'screen', label: 'Screen', icon: 'i-monitor' }],
   ui: '/ui/index.js',
   health: '/api/health',
-  capabilities: ['sse', 'fullscreen', 'webcodecs'],
+  icon: 'i-monitor',
+  capabilities: ['sse', 'fullscreen', 'webcodecs', 'summary'],
 };
 
 app.get('/module.json', (_req, res) => res.json(MANIFEST));
@@ -112,6 +113,44 @@ app.get('/api/health', (_req, res) => {
       rdp: list.filter((d) => d.transport !== 'agent').length,
     },
     guacd: NEEDS_GUACD() ? `${GUACD_HOST}:${GUACD_PORT}` : 'not required',
+  });
+});
+
+/**
+ * The console's front page.
+ *
+ * What is worth knowing before you open this module is whether the machine you
+ * want is reachable right now — not how many devices are configured, which
+ * never changes. A dual-boot pair means exactly one of the two is up at a
+ * time, so "1 of 3" is the healthy state and the names are the information.
+ */
+app.get('/api/summary', (_req, res) => {
+  const list = devices.list();
+  const online = list.filter((d) => d.online === true);
+  const offline = list.filter((d) => d.online === false);
+  const unknown = list.filter((d) => d.online == null);
+
+  const facts = [
+    { k: 'Reachable', v: online.length ? online.map((d) => d.name).join(', ') : 'nothing' },
+    offline.length ? { k: 'Offline', v: offline.map((d) => d.name).join(', ') } : null,
+    // Latency is the one number here that changes and that you would act on:
+    // a link that has gone from 8ms to 400ms is a session that will feel awful
+    // before you have finished opening it.
+    online.length && Number.isFinite(online[0].latencyMs)
+      ? { k: 'Latency', v: online.map((d) => `${d.name} ${Math.round(d.latencyMs)}ms`).slice(0, 2).join(' · ') }
+      : null,
+    unknown.length ? { k: 'Not probed yet', v: unknown.map((d) => d.name).join(', ') } : null,
+  ].filter(Boolean).slice(0, 4);
+
+  res.json({
+    status: online.length ? 'ok' : 'warn',
+    headline: online.length
+      ? `${online.length} of ${list.length} reachable`
+      : 'nothing reachable',
+    facts,
+    alerts: online.length ? [] : [{
+      text: 'No device is reachable', severity: 'warn', view: 'screen',
+    }],
   });
 });
 
