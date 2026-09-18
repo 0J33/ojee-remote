@@ -112,6 +112,39 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // Mouse button bitmask bits (per RFB spec).
   const BTN_LEFT = 0x01, BTN_MIDDLE = 0x02, BTN_RIGHT = 0x04;
 
+  /* guacd reports failures as numeric statuses. Passed through raw they read
+     as "rdp error: 519", which tells you nothing; named, they usually tell you
+     the whole story — 519 is "nothing is listening on that port", which for a
+     laptop means it is off, asleep, or its RDP server is not running. */
+  const GUAC_STATUS = {
+    256: 'the host closed the session',
+    512: 'the remote desktop server hit an error',
+    513: 'the host is too busy to accept a session',
+    514: 'the host stopped responding',
+    515: 'the remote desktop server failed',
+    516: 'that session no longer exists',
+    517: 'the host is already in a conflicting session',
+    518: 'the session was closed on the host',
+    519: 'nothing is listening for RDP on that host — it may be off, asleep, or its remote desktop is disabled',
+    520: 'the host refused the connection',
+    521: 'someone else is already connected to that session',
+    522: 'the session timed out',
+    523: 'the session was closed',
+    768: 'the host rejected the connection request',
+    769: 'the host refused these credentials',
+    771: 'the host refused access to this session',
+    776: 'the host gave up waiting',
+    797: 'too many connections to that host',
+  };
+
+  function guacReason(e) {
+    const code = typeof e === 'object' ? (e.code ?? e.status) : e;
+    const named = GUAC_STATUS[code];
+    if (named) return named;
+    const msg = (typeof e === 'object' && (e.message || e.reason)) || '';
+    return msg || `the connection failed (${code ?? 'unknown'})`;
+  }
+
   // ── status helpers ────────────────────────────────────────────────────
   function setStatus(text, kind = '') {
     statusEl.textContent = text;
@@ -122,6 +155,138 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   let reconnectTimer = null;
   let userSwitchedDevice = false;  // prevents the auto-reconnect after a manual switch
   let rdpGeneration = 0;           // invalidates stale RDP death handlers after reconnects
+
+  /* Retrying is for a connection that was interrupted. It is NOT a way to fix
+     a host that is locked, asleep, or refusing the protocol — those fail the
+     same way every time, and dialling again on a 1.5s timer forever produces
+     the thing this replaces: a session that says "reconnecting…" indefinitely
+     and never explains why. Six tries over about a minute, then stop and say
+     what happened, with the action that actually fixes it. */
+  const MAX_ATTEMPTS = 6;
+  const BACKOFF_MS = [1500, 3000, 6000, 10000, 15000, 20000];
+  let attempts = 0;
+  let lastReason = '';        // the real one, kept because onDead overwrites the status
+
+  function connectionOk() {
+    attempts = 0;
+    lastReason = '';
+    hideBlocker();
+  }
+
+  function scheduleReconnect(why) {
+    if (why) lastReason = why;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (userSwitchedDevice) { userSwitchedDevice = false; return; }
+
+    if (attempts >= MAX_ATTEMPTS) { giveUp(); return; }
+    const delay = BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length - 1)];
+    attempts += 1;
+    setStatus(`reconnecting ${attempts}/${MAX_ATTEMPTS}${lastReason ? ` · ${lastReason}` : ''}`, 'err');
+    reconnectTimer = setTimeout(connect, delay);
+  }
+
+  /** Ask the host whether its screen is locked. Never throws: this runs while
+      something is already going wrong, and a failed diagnosis must not become
+      the error being reported. */
+  async function lockState() {
+    try {
+      return await ctx.api(`/devices/${encodeURIComponent(activeDevice.id)}/lock`);
+    } catch {
+      return null;
+    }
+  }
+
+  async function giveUp() {
+    setStatus(lastReason || 'cannot connect', 'err');
+    const lock = await lockState();
+    if (lock?.locked) {
+      showBlocker({
+        title: `${activeDevice.name} is locked`,
+        detail: 'Its screen is locked, which is why the session will not open. '
+              + 'Unlocking does not need the password — reaching this page already proved who you are.',
+        actions: [
+          { label: 'Unlock and connect', primary: true, run: unlockAndConnect },
+          { label: 'Try again', run: retryNow },
+        ],
+      });
+      return;
+    }
+    showBlocker({
+      title: `Cannot reach ${activeDevice.name}`,
+      detail: (lastReason || 'the host did not accept the connection')
+            + (lock && lock.locked === false ? ' · its screen is not locked, so that is not the reason' : ''),
+      actions: [
+        { label: 'Try again', primary: true, run: retryNow },
+        { label: 'Leave', run: () => onExit?.() },
+      ],
+    });
+  }
+
+  function retryNow() {
+    attempts = 0;
+    hideBlocker();
+    connect();
+  }
+
+  async function unlockAndConnect() {
+    setStatus('unlocking…');
+    try {
+      const r = await ctx.api(`/devices/${encodeURIComponent(activeDevice.id)}/unlock`,
+        { method: 'POST' });
+      if (r && r.ok === false) throw new Error(r.error || 'the screen stayed locked');
+      ctx.toast?.('ok', 'Unlocked', `${activeDevice.name} is unlocked.`);
+      retryNow();
+    } catch (e) {
+      ctx.toast?.('err', 'Could not unlock', e.message);
+      setStatus(`could not unlock: ${e.message}`, 'err');
+    }
+  }
+
+  // ── the blocker ───────────────────────────────────────────────────────
+  /* A status chip is thirty characters wide and holds no buttons. When the
+     session has stopped trying, what is needed is the reason and the way out,
+     in the middle of the screen where the picture used to be. */
+  let blockerEl = null;
+
+  function hideBlocker() {
+    blockerEl?.remove();
+    blockerEl = null;
+  }
+
+  function showBlocker({ title, detail, actions = [] }) {
+    hideBlocker();
+    blockerEl = document.createElement('div');
+    blockerEl.className = 'rs-blocker';
+    const card = document.createElement('div');
+    card.className = 'rs-blocker-card';
+
+    const h = document.createElement('h2');
+    h.className = 'rs-blocker-title';
+    h.textContent = title;
+    card.appendChild(h);
+
+    const p = document.createElement('p');
+    p.className = 'rs-blocker-detail';
+    p.textContent = detail;
+    card.appendChild(p);
+
+    const row = document.createElement('div');
+    row.className = 'rs-blocker-actions';
+    for (const a of actions) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `rs-blocker-btn${a.primary ? ' is-primary' : ''}`;
+      b.textContent = a.label;
+      b.addEventListener('click', () => a.run());
+      row.appendChild(b);
+    }
+    card.appendChild(row);
+    blockerEl.appendChild(card);
+    // Into .rs, not the host element: .rs is the positioned, fixed-inset
+    // ancestor, and `position: absolute` against an unpositioned host would
+    // anchor the overlay to the page instead of the session.
+    (root.querySelector('.rs') || root).appendChild(blockerEl);
+  }
 
   async function connect() {
     if (!activeDevice) return;
@@ -161,6 +326,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         const what = layout.active === 'desktop'
           ? (shared < total ? `desktop · ${shared} of ${total} monitors shared` : 'desktop')
           : (layout.active || '');
+        connectionOk();
         setStatus(`connected · ${activeDevice.name}${what ? ' · ' + what : ''}`, 'ok');
         const firstLayout = !monitors.length;
         loadMonitors();
@@ -174,8 +340,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       onClose: (why) => {
         if (myGen !== rdpGeneration) return;
         if (userSwitchedDevice) { userSwitchedDevice = false; return; }
-        setStatus(opened ? `reconnecting… (${why})` : `cannot reach the host agent (${why})`, 'err');
-        reconnectTimer = setTimeout(connect, opened ? 1500 : 4000);
+        scheduleReconnect(opened ? why : `cannot reach the host agent (${why})`);
       },
       onFailure: (detail) => {
         if (myGen !== rdpGeneration) return;
@@ -242,8 +407,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       token = (await ctx.api(
         `/devices/${encodeURIComponent(activeDevice.id)}/token${q}`)).token;
     } catch (e) {
-      setStatus(`token fetch failed: ${e.message}`, 'err');
-      reconnectTimer = setTimeout(connect, 3000);
+      scheduleReconnect(`token fetch failed: ${e.message}`);
       return;
     }
 
@@ -287,17 +451,19 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     // that was why a dead session froze on its last frame with no reconnect.
     const myGen = ++rdpGeneration;
     let deadHandled = false;
+    // guacd says WHY on the error channel and then closes the tunnel, which
+    // used to overwrite the reason with a bare "reconnecting…" a frame later.
+    let lastGuacError = '';
     const onDead = () => {
       if (deadHandled || myGen !== rdpGeneration) return;
       deadHandled = true;
-      if (userSwitchedDevice) { userSwitchedDevice = false; return; }
-      setStatus('reconnecting…', 'err');
-      reconnectTimer = setTimeout(connect, 1500);
+      scheduleReconnect(lastGuacError);
     };
 
     gc.onstatechange = async (state) => {
       // 3 = CONNECTED, 5 = DISCONNECTED (Guacamole.Client state constants)
       if (state === 3) {
+        connectionOk();
         setStatus(`connected · ${activeDevice.name}`, 'ok');
         await loadMonitors();
         recenterCursor();
@@ -309,7 +475,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     tunnel.onstatechange = (s) => {
       if (s === Guacamole.Tunnel.State.CLOSED) onDead();
     };
-    gc.onerror = (e) => setStatus(`rdp error: ${e.message || e.code || 'unknown'}`, 'err');
+    gc.onerror = (e) => {
+      lastGuacError = guacReason(e);
+      setStatus(lastGuacError, 'err');
+    };
     tunnel.onerror = () => onDead();
     display.onresize = () => applyFitOrFocus();
     // Remote audio (g-r-d streams RDP audio; L16 PCM plays via Web Audio).
@@ -323,56 +492,6 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     );
   }
 
-  async function loadDevices() {
-    try {
-      const r = await ctx.api('/devices');
-      if (!r.ok) throw new Error(r.statusText);
-      devices = (await r.json()).devices || [];
-    } catch (e) {
-      setStatus('cannot load device list', 'err');
-      return;
-    }
-    if (!devices.length) {
-      setStatus('no devices configured', 'err');
-      return;
-    }
-    activeDevice = devices[0];
-    renderDeviceChips();
-    connect();
-  }
-
-  function renderDeviceChips() {
-    root.querySelector('#rd-devices-group').hidden = devices.length <= 1;
-    devicesEl.innerHTML = '';
-    devices.forEach((d) => {
-      const b = document.createElement('button');
-      b.className = 'rs-chip' + (activeDevice && d.id === activeDevice.id ? ' on' : '');
-      b.textContent = d.name;
-      b.title = d.local ? 'this host' : 'remote (over Tailscale)';
-      b.onclick = () => switchDevice(d);
-      devicesEl.appendChild(b);
-    });
-  }
-
-  async function switchDevice(d) {
-    if (!d || (activeDevice && d.id === activeDevice.id)) return;
-    activeDevice = d;
-    focusedMonitor = null;
-    monitors = [];
-    resetView();
-    renderDeviceChips();
-    renderMonitorChips();
-    if (client) {
-      userSwitchedDevice = true;
-      client.disconnect();
-      client = null;
-      rfb = null;
-    }
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    await connect();
-  }
-
-  // ── monitors ──────────────────────────────────────────────────────────
   async function loadMonitors() {
     if (!activeDevice) return;
     // An agent session already knows the layout: the stream carries it, in
@@ -1339,8 +1458,11 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     connect();
   }
 
-  // The old app called loadDevices() at the end of the script; here the device
-  // is already chosen, so jump straight to it.
+  // The old app discovered devices and picked the first; here the chooser has
+  // already made that choice, so jump straight to it. (loadDevices() used to
+  // live above for that old flow. It had rotted — it treated ctx.api's parsed
+  // JSON as a fetch Response, so `r.ok` was undefined and every call threw
+  // "cannot load device list" — and nothing had called it in a long time.)
   bootSession(deviceId);
 
   return function teardown() {

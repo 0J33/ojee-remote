@@ -58,6 +58,7 @@ from websockets.server import serve  # noqa: E402
 import capture  # noqa: E402
 import display  # noqa: E402
 import inject  # noqa: E402
+import lock  # noqa: E402
 import mutter  # noqa: E402
 import pin  # noqa: E402
 import portal  # noqa: E402
@@ -775,6 +776,9 @@ async def http_handler(path, request_headers, agent: Agent):
             # Says plainly that this no longer depends on g-r-d, and therefore
             # never moves the primary display.
             "capture": f"{agent.backend.__name__ if agent.backend else 'none'}-pipewire",
+            # So the console can say "locked" on the device chip rather than
+            # letting you tap it and watch the connection fail.
+            "lock": lock.state(),
         }
         if not body["ok"]:
             body["reason"] = ("no capturable monitor" if agent.backend is mutter else
@@ -802,6 +806,24 @@ async def http_handler(path, request_headers, agent: Agent):
                     [("content-type", "application/json")],
                     (json.dumps({"error": str(e)}) + "\n").encode())
         return (HTTPStatus.OK, [("content-type", "application/json")],
+                (json.dumps(result) + "\n").encode())
+
+    if path.split("?")[0] == "/lock":
+        return (HTTPStatus.OK, [("content-type", "application/json")],
+                (json.dumps(lock.state()) + "\n").encode())
+
+    if path.split("?")[0] == "/unlock":
+        # Lifting the lock is most of the point of reaching a machine you are
+        # not sitting at. It runs off the event loop because it shells out and
+        # then waits for the shell to catch up, which must not stall a stream.
+        #
+        # Reached with GET, like /regrant above: this server is a WebSocket
+        # server with an HTTP side door, and the handshake layer rejects a POST
+        # before process_request ever sees it. An action behind GET is the
+        # convention here rather than an oversight.
+        result = await asyncio.get_running_loop().run_in_executor(None, lock.unlock)
+        status = HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT
+        return (status, [("content-type", "application/json")],
                 (json.dumps(result) + "\n").encode())
 
     return (HTTPStatus.NOT_FOUND, [("content-type", "application/json")],

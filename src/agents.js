@@ -94,6 +94,29 @@ export class HostAgents {
   }
 
   /**
+   * Is that machine's screen locked?
+   *
+   * Worth knowing BEFORE connecting: a locked host is the single most common
+   * reason a session fails to come up, and answering it in the device list is
+   * cheaper than a failed connection and a reconnect loop.
+   */
+  async lockState(device) {
+    return this.#call(device, '/lock');
+  }
+
+  /**
+   * Lift the lock on that machine's screen.
+   *
+   * GET, like /regrant: the agent is a WebSocket server with an HTTP side
+   * door and its handshake layer refuses a POST before the route is reached.
+   * The longer timeout covers the agent waiting for the shell to actually
+   * clear the lock, rather than reporting the moment before it does.
+   */
+  async unlock(device) {
+    return this.#call(device, '/unlock', { timeoutMs: 15_000 });
+  }
+
+  /**
    * Ask the agent to make `monitor` primary. Resolves only once the agent has
    * confirmed the compositor applied it — the client can then reconnect
    * knowing the session is rebuilt, rather than guessing on a timer.

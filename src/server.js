@@ -230,6 +230,42 @@ app.post('/api/devices/:id/regrant', async (req, res) => {
 });
 
 /**
+ * Is that machine's screen locked, and lift it if so.
+ *
+ * These exist because "the host is locked" was indistinguishable from "the
+ * host is broken": gnome-remote-desktop refuses a connection to a locked
+ * session, guacd reported upstream failure, and the client dialled again on a
+ * timer forever. Now the reason is a fact the UI can state, with the one
+ * action that fixes it next to it.
+ */
+app.get('/api/devices/:id/lock', async (req, res) => {
+  const d = devices.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'unknown_device' });
+  try {
+    res.json(await agents.lockState(d));
+  } catch (e) {
+    res.status(e.status || 502).json({ error: e.code || 'agent_unreachable', detail: e.message });
+  }
+});
+
+app.post('/api/devices/:id/unlock', async (req, res) => {
+  const d = devices.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'unknown_device' });
+  if (!d.agent?.url) {
+    // An RDP-only device has no agent to ask, and saying so is better than a
+    // 502 that reads like the machine is down.
+    return res.status(501).json({ error: 'no_agent',
+      detail: `${d.name} has no host agent, so its screen cannot be unlocked remotely` });
+  }
+  try {
+    const r = await agents.unlock(d);
+    res.status(r.ok ? 200 : 409).json(r);
+  } catch (e) {
+    res.status(e.status || 502).json({ error: e.code || 'agent_unreachable', detail: e.message });
+  }
+});
+
+/**
  * Switch which monitor is streamed.
  *
  * This does NOT return until the host agent confirms the compositor has
