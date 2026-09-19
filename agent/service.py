@@ -679,6 +679,40 @@ def _supplied_token(path: str, headers) -> str:
     return ""
 
 
+async def _run_together(*coros) -> list[BaseException]:
+    """Run tasks side by side; the first one to fail cancels the rest.
+
+    This is asyncio.TaskGroup's contract, written out because TaskGroup — and
+    the `except*` that goes with it — needs Python 3.11, and the machines this
+    agent runs on do not all have it. The HP box is Zorin 17 on Ubuntu 22.04:
+    Python 3.10, and its GObject and D-Bus bindings are built for that
+    interpreter, so "install a newer Python" is not an option there.
+
+    Returns the exceptions the tasks raised (empty if they all finished).
+    Cancelling the caller cancels every task before re-raising, so nothing is
+    left running when the connection that owns them is gone.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_EXCEPTION)
+            failed = [t.exception() for t in done
+                      if not t.cancelled() and t.exception() is not None]
+            if failed:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                return failed
+        return []
+    except asyncio.CancelledError:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def ws_handler(ws, agent: Agent):
     # Auth. The tailnet is the real boundary, but a token stops any other peer
     # on it — a phone, a CI runner, a housemate's laptop — from watching the
@@ -723,21 +757,20 @@ async def ws_handler(ws, agent: Agent):
         if agent.stream:
             agent.stream.force_keyframe()
 
-        # TaskGroup, not gather(). gather() does NOT cancel its siblings when
-        # one task raises, so on every disconnect the sender (blocked on the
-        # queue), the pinger and the adapt loop would all survive as orphans —
-        # a leak that grows with every connection and keeps the encoder alive
-        # because the client is never removed from the set.
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(client.sender())
-            tg.create_task(client.receiver())
-            tg.create_task(client.pinger())
-            tg.create_task(client.adapt())
-    except* websockets.exceptions.ConnectionClosed:
+        # Not gather(). gather() does NOT cancel its siblings when one task
+        # raises, so on every disconnect the sender (blocked on the queue), the
+        # pinger and the adapt loop would all survive as orphans — a leak that
+        # grows with every connection and keeps the encoder alive because the
+        # client is never removed from the set. _run_together cancels them.
+        failures = await _run_together(
+            client.sender(), client.receiver(), client.pinger(), client.adapt())
+        for e in failures:
+            if not isinstance(e, websockets.exceptions.ConnectionClosed):
+                print(f"[client] {type(e).__name__}: {e}", flush=True)
+    except websockets.exceptions.ConnectionClosed:
         pass
-    except* Exception as eg:
-        for e in eg.exceptions:
-            print(f"[client] {type(e).__name__}: {e}", flush=True)
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[client] {type(e).__name__}: {e}", flush=True)
     finally:
         agent.clients.discard(client)
         # Stop encoding when nobody is watching. This is the difference between
