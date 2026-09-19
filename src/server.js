@@ -38,6 +38,7 @@ import GuacCrypt from 'guacamole-lite/lib/Crypt.js';
 import { DeviceRegistry } from './devices.js';
 import { HostAgents } from './agents.js';
 import { createAgentProxy } from './agent-proxy.js';
+import { createShellBridge } from './shell.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
@@ -53,10 +54,10 @@ const {
 } = process.env;
 
 // guacd is only needed for rdp/vnc devices — the Linux path goes through the
-// host agent instead. A deployment with only agent-backed devices should not
-// be forced to run guacd or invent a key for it.
+// host agent, and an ssh device has no pixels at all. A deployment without a
+// single RDP screen should not be forced to run guacd or invent a key for it.
 const NEEDS_GUACD = () => devices.devices.some(
-  (d) => d.transport !== 'agent' || d.fallback);
+  (d) => d.transport === 'rdp' || d.transport === 'vnc' || d.fallback);
 
 const devices = new DeviceRegistry({
   file: DEVICES_FILE,
@@ -86,7 +87,13 @@ const MANIFEST = {
   id: 'remote',
   name: 'Remote',
   version: pkg.version,
-  views: [{ id: 'screen', label: 'Screen', icon: 'i-monitor' }],
+  views: [
+    { id: 'screen', label: 'Screen', icon: 'i-monitor' },
+    // A terminal is the same device list with a different verb, so it is a
+    // view here rather than a module of its own — one devices.json, one
+    // presence poll, one set of credentials.
+    { id: 'shell', label: 'Shell', icon: 'i-terminal' },
+  ],
   ui: '/ui/index.js',
   health: '/api/health',
   icon: 'i-monitor',
@@ -396,6 +403,16 @@ app.use('/ui', express.static(join(ROOT, 'ui'), {
   setHeaders: (res) => res.setHeader('cache-control', 'no-cache'),
 }));
 app.use('/guac-js', express.static(join(ROOT, 'node_modules', 'guacamole-common-js', 'dist', 'esm')));
+// xterm.js for the Shell view, served the same way: from node_modules, no
+// build step, no CDN. Three directories mounted on one path — express.static
+// falls through, so /vendor/xterm.js, /vendor/xterm.css and
+// /vendor/addon-fit.js each resolve from whichever package holds them.
+const VENDOR = [
+  ['@xterm', 'xterm', 'lib'],
+  ['@xterm', 'xterm', 'css'],
+  ['@xterm', 'addon-fit', 'lib'],
+].map((parts) => join(ROOT, 'node_modules', ...parts));
+for (const dir of VENDOR) app.use('/vendor', express.static(dir, { maxAge: '1h' }));
 // The standalone shell. Mounted in a console this is never requested; served
 // alone it is the whole front end. See the README — standalone is tested, not
 // assumed, because this deployment only ever runs it mounted.
@@ -430,6 +447,7 @@ if (guac) {
 }
 
 const agentProxy = createAgentProxy({ devices });
+const shellBridge = createShellBridge({ devices });
 
 server.on('upgrade', (req, socket, head) => {
   // Auth already happened: mounted, the console's three gates ran before it
@@ -438,6 +456,9 @@ server.on('upgrade', (req, socket, head) => {
   // Agent-backed devices — the Linux path. The proxy attaches the agent's
   // bearer token, which the browser therefore never has to hold.
   if (agentProxy.handleUpgrade(req, socket, head)) return;
+
+  // A terminal on the same device list. Claims /shell?device=<id>.
+  if (shellBridge.handleUpgrade(req, socket, head)) return;
 
   const { pathname } = new URL(req.url, 'http://x');
   if (pathname === '/guac' && guac) {
@@ -457,13 +478,17 @@ server.listen(Number(PORT), HOST, () => {
   console.log(`ojee-remote ${pkg.version} on http://${HOST}:${PORT}`);
   console.log(`  guacd ${NEEDS_GUACD() ? `${GUACD_HOST}:${GUACD_PORT}` : 'not required (no rdp/vnc devices)'}`);
   for (const d of devices.devices) {
-    const where = d.transport === 'agent' ? d.agent.url : `${d.protocol}://${d.host}:${d.port}`;
-    console.log(`  ${d.id.padEnd(14)} ${d.transport.padEnd(6)} ${where}  [${d.monitors}]`);
+    const where = d.transport === 'agent' ? d.agent.url
+      : d.transport === 'ssh' ? `ssh://${d.ssh.username}@${d.ssh.host}:${d.ssh.port}`
+      : `${d.protocol}://${d.host}:${d.port}`;
+    const shell = d.ssh && d.transport !== 'ssh' ? `  + shell ${d.ssh.username}@${d.ssh.host}:${d.ssh.port}` : '';
+    console.log(`  ${d.id.padEnd(14)} ${d.transport.padEnd(6)} ${where}  [${d.monitors}]${shell}`);
   }
 });
 
 const shutdown = () => {
   devices.stop();
+  shellBridge.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 };

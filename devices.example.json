@@ -18,7 +18,14 @@
       "100.x address, which can change when a node is re-authed.",
       "",
       "password and agent.token are blank ON PURPOSE. Fill them in your own",
-      "devices.json — that file is gitignored; this one is committed."
+      "devices.json — that file is gitignored; this one is committed.",
+      "",
+      "ssh is optional and independent of how the pixels arrive: a machine can",
+      "have a desktop AND a terminal, or nothing but a terminal (transport",
+      "\"ssh\", as the last device here). Auth is keyFile, or password, or",
+      "neither — with neither, the gateway's own ssh-agent is used.",
+      "fingerprint is the host key to expect; leave it out and the first",
+      "connection logs the one it saw, so there is something to paste in."
     ],
 
     "id": "loq-linux",
@@ -33,6 +40,11 @@
       "url": "http://your-linux-box:8210",
       "token": ""
     },
+    "ssh": {
+      "username": "your-user",
+      "keyFile": "~/.ssh/id_ed25519",
+      "fingerprint": ""
+    },
     "presence": { "intervalMs": 5000 }
   },
   {
@@ -45,5 +57,23 @@
     "password": "",
     "monitors": "multimon",
     "presence": { "intervalMs": 5000 }
+  },
+
+  {
+    "_comment": [
+      "A headless box: no screen to take over, but a shell to work in. It",
+      "shows up in the Shell view only, and its presence is sshd answering.",
+      "port defaults to 22, host and username default to the device's."
+    ],
+
+    "id": "server",
+    "name": "Home server",
+    "transport": "ssh",
+    "host": "your-server",
+    "ssh": {
+      "username": "your-user",
+      "keyFile": "~/.ssh/id_ed25519"
+    },
+    "presence": { "intervalMs": 10000 }
   }
 ]

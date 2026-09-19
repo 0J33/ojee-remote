@@ -1,7 +1,7 @@
 # ojee-remote
 
-Browser remote desktop over a tailnet. Multi-monitor, presence-aware, and — the part that took
-the longest — **it never moves your primary display**.
+Browser remote desktop over a tailnet, and a terminal on the same machines. Multi-monitor,
+presence-aware, and — the part that took the longest — **it never moves your primary display**.
 
 Runs standalone or as an [ojee-console](../ojee-console) module.
 
@@ -66,6 +66,24 @@ reuses the console's already-authenticated proxy — no second auth path, no ICE
 where "works at home, fails on cellular" usually comes from. Bitrate adapts from measured RTT and
 how far behind the client is.
 
+
+**A shell, on the same device list.** The Shell view opens a terminal over SSH: `/shell?device=<id>`,
+a PTY on the far end, bytes both ways. It is a view rather than a module because "ssh instead of
+rdp" is the same machines with a different verb — one `devices.json`, one presence poll, one set of
+credentials on the gateway. A device can have both a screen and a shell; a headless box
+(`"transport": "ssh"`) has only the shell and appears in that view alone.
+
+```
+   browser                      gateway                       the machine
+  ┌────────┐                 ┌───────────┐                  ┌────────────┐
+  │xterm.js│◀── bytes ───────│ ssh2 + PTY│◀─── SSH ────────▶│ your shell │
+  └────────┘── keys/size ───▶└───────────┘                  └────────────┘
+```
+
+Credentials stay on the gateway exactly like the RDP ones: `keyFile`, `password`, or neither — with
+neither, the gateway's own `ssh-agent` is used. Pin a host key with `ssh.fingerprint`; leave it out
+and the first connection logs the fingerprint it saw, so there is something to paste in. Files over
+SFTP will ride this same connection: one dial, one credential, one thing to get right.
 ---
 
 ## Setup
@@ -186,6 +204,37 @@ untouched throughout, and the encoder stopping when nobody is watching.
 ## Licence
 
 MIT.
+
+## A terminal instead of a desktop
+
+Add an `ssh` block to any device in `devices.json` and it appears in the **Shell** view:
+
+```jsonc
+{
+  "id": "loq-linux",
+  "host": "loq",
+  "transport": "agent",
+  "agent": { "url": "http://loq:8210", "token": "…" },
+  "ssh": {
+    "username": "ojee",
+    "keyFile": "~/.ssh/id_ed25519",   // or "password": "…", or neither for the gateway's ssh-agent
+    "fingerprint": ""                  // paste the one the first connection logs
+  }
+}
+```
+
+A machine with nothing to look at is `"transport": "ssh"` and needs no agent, no guacd and no
+`GUAC_KEY` — its presence is sshd answering, and it shows up in the Shell view only.
+
+The terminal is xterm.js, served from `node_modules` at `/vendor` like `guac-js` — no build step and
+no CDN. The key row (Esc, Tab, arrows, `^C`, `^D`, `^Z`, `^L`) exists for the same reason the screen
+session has one: a touchscreen cannot send them, and a terminal without `^C` is a read-only log.
+
+End to end this was verified against a throwaway `sshd` on port 2222 with its own host key and
+`authorized_keys`, from a browser: a real PTY (`TERM=xterm-256color`), `tput cols` matching the
+fitted terminal, live resize through `setWindow`, `^C` interrupting a `sleep`, and the three
+failure paths — unknown device (404 on the upgrade), unreadable `keyFile`, and a mismatched pinned
+fingerprint — each arriving as a sentence in the terminal rather than a silent close.
 
 ## Typing from a phone
 

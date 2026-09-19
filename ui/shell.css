@@ -1,0 +1,95 @@
+/* The Shell view. A terminal fills the panel; the chrome above it is one
+   row so a phone keeps its screen for the terminal. */
+
+.sh {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 10px);
+  overflow: hidden;
+}
+
+.sh-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2, var(--bg-1));
+  min-width: 0;
+}
+.sh-back {
+  display: grid;
+  place-items: center;
+  width: 30px; height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  flex: 0 0 auto;
+}
+.sh-back:hover { border-color: var(--line-hover); background: var(--accent-03); }
+.sh-name {
+  font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+.sh-state {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: .02em;
+  color: var(--ink-2, #8b949e);
+  white-space: nowrap;
+}
+.sh-state[data-state="connected"] { color: var(--ok, #3fb950); }
+.sh-state[data-state="error"],
+.sh-state[data-state="disconnected"] { color: var(--err, #f85149); }
+.sh-actions { margin-left: auto; display: flex; gap: 4px; flex: 0 0 auto; }
+.sh-btn {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  padding: 5px 9px;
+}
+.sh-btn:hover { border-color: var(--line-hover); background: var(--accent-03); }
+
+/* The key row: only what a touchscreen genuinely cannot send. */
+.sh-keys {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.sh-keys::-webkit-scrollbar { display: none; }
+.sh-key {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.sh-key:active { background: var(--accent-08); }
+
+.sh-term {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px 4px 4px 8px;
+}
+.sh-term .xterm { height: 100%; }
+.sh-term .xterm-viewport { overflow-y: auto; }
+
+@media (max-width: 560px) {
+  .sh-name { display: none; }
+  .sh-btn { padding: 5px 7px; }
+}

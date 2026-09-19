@@ -53,8 +53,12 @@ const MONITOR_MODES = new Set(['portal', 'multimon', 'single', 'primary-switch']
  *   rdp    guacd speaks RDP to the machine. Windows can stream every monitor
  *          in one session (multimon), which gnome-remote-desktop cannot — so
  *          the Windows side gets the merged canvas for free.
+ *
+ *   ssh    No pixels at all: a terminal, and later files over SFTP. For a
+ *          headless box, and for the times you want a shell rather than a
+ *          desktop on a machine that has both.
  */
-const TRANSPORTS = new Set(['agent', 'rdp', 'vnc']);
+const TRANSPORTS = new Set(['agent', 'rdp', 'vnc', 'ssh']);
 
 /** "1920x1080" -> {w, h}; anything else -> null (the browser's size is used). */
 function parseSize(v) {
@@ -101,11 +105,14 @@ export class DeviceRegistry {
       if (!d.host) throw new Error(`${where}: host is required.`);
 
       // `transport` is the new axis; `protocol` is kept for rdp/vnc devices.
-      const transport = d.transport || (d.agent?.url ? 'agent' : 'rdp');
+      const transport = d.transport || (d.agent?.url ? 'agent' : d.ssh && !d.password ? 'ssh' : 'rdp');
       if (!TRANSPORTS.has(transport)) {
         throw new Error(`${where}: transport must be one of ${[...TRANSPORTS].join(', ')}.`);
       }
-      const protocol = d.protocol || (transport === 'agent' ? 'h264' : 'rdp');
+      const protocol = d.protocol || (transport === 'agent' ? 'h264' : transport === 'ssh' ? 'ssh' : 'rdp');
+      if (transport === 'ssh' && !d.ssh) {
+        throw new Error(`${where}: transport "ssh" needs an ssh block (host defaults to the device's).`);
+      }
 
       const monitors = d.monitors || (transport === 'agent' ? 'portal' : 'single');
       if (!MONITOR_MODES.has(monitors)) {
@@ -129,7 +136,7 @@ export class DeviceRegistry {
         transport,
         protocol,
         host: d.host,
-        port: Number(d.port) || (protocol === 'rdp' ? 3389 : 5900),
+        port: Number(d.port) || (protocol === 'rdp' ? 3389 : protocol === 'ssh' ? 22 : 5900),
         username: d.username || '',
         password: d.password || '',
         domain: d.domain || '',
@@ -145,6 +152,25 @@ export class DeviceRegistry {
         size: parseSize(d.size),
         monitors,
         agent: d.agent ? { url: String(d.agent.url).replace(/\/+$/, ''), token: d.agent.token || '' } : null,
+        /**
+         * A shell on the same machine, over SSH. Independent of how (or
+         * whether) its pixels arrive: a Windows box with RDP can still have
+         * one, and a headless server has nothing but this.
+         *
+         * Credentials stay here like every other credential in this file —
+         * `sanitize()` publishes a boolean and nothing else. `fingerprint` is
+         * the host key to expect; the first connection logs the one it saw so
+         * there is something to paste in.
+         */
+        ssh: d.ssh ? {
+          host: d.ssh.host || d.host,
+          port: Number(d.ssh.port) || 22,
+          username: d.ssh.username || d.username || '',
+          password: d.ssh.password || '',
+          keyFile: d.ssh.keyFile || '',
+          passphrase: d.ssh.passphrase || '',
+          fingerprint: d.ssh.fingerprint || '',
+        } : null,
         /**
          * A second way in, for clients the primary transport cannot serve.
          *
@@ -196,6 +222,9 @@ export class DeviceRegistry {
       protocol: d.protocol,
       monitors: d.monitors,
       hasAgent: !!d.agent?.url,
+      // Whether this device offers a terminal. The chooser needs it to know
+      // which machines belong in the Shell view.
+      hasShell: !!d.ssh,
       // Whether a canvas-2D route exists for this device. The client needs to
       // know BEFORE it tries, so a browser that cannot decode H.264 can take
       // the other path instead of showing a black screen and a frame counter.
@@ -228,6 +257,11 @@ export class DeviceRegistry {
     if (device.transport === 'agent' && device.agent?.url) {
       const u = new URL(device.agent.url);
       return { host: u.hostname, port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80) };
+    }
+    // An ssh-only device is up when sshd answers. Its `port` is already 22,
+    // but the ssh block may point somewhere else entirely.
+    if (device.transport === 'ssh' && device.ssh) {
+      return { host: device.ssh.host, port: device.ssh.port };
     }
     return { host: device.host, port: device.port };
   }
