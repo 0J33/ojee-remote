@@ -125,6 +125,11 @@ export class DeviceRegistry {
         username: d.username || '',
         password: d.password || '',
         domain: d.domain || '',
+        // Carried through like the fallback's. It used to be dropped here for
+        // a primary RDP device, so `"security": "rdp"` in devices.json
+        // silently became NLA — which xrdp refuses without a password, so the
+        // session died before its login screen could appear.
+        security: d.security || '',
         monitors,
         agent: d.agent ? { url: String(d.agent.url).replace(/\/+$/, ''), token: d.agent.token || '' } : null,
         /**
