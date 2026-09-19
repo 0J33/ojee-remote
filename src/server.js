@@ -321,8 +321,10 @@ app.get('/api/devices/:id/token', async (req, res) => {
     });
   }
 
-  const width = Math.min(Number(req.query.width) || 1920, 8192);
-  const height = Math.min(Number(req.query.height) || 1080, 8192);
+  // A device with a fixed size gets that size whoever connects; otherwise the
+  // desktop is made to fit the browser that asked.
+  const width = d.size?.w || Math.min(Number(req.query.width) || 1920, 8192);
+  const height = d.size?.h || Math.min(Number(req.query.height) || 1080, 8192);
 
   // An agent-backed device asked for over guacd means the client cannot use
   // WebCodecs — iOS Safari being the case that matters — so serve its fallback

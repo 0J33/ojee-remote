@@ -402,8 +402,9 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       // Ask for the token at the size we will actually display, so guacd
       // negotiates a framebuffer that fits rather than one we then scale.
       const dpr = window.devicePixelRatio || 1;
-      const q = `?width=${Math.round(window.innerWidth * dpr)}`
-              + `&height=${Math.round(window.innerHeight * dpr)}`;
+      const fixed = activeDevice.size;
+      const q = `?width=${fixed ? fixed.w : Math.round(window.innerWidth * dpr)}`
+              + `&height=${fixed ? fixed.h : Math.round(window.innerHeight * dpr)}`;
       token = (await ctx.api(
         `/devices/${encodeURIComponent(activeDevice.id)}/token${q}`)).token;
     } catch (e) {
@@ -485,10 +486,15 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     gc.onaudio = (stream, mimetype) => Guacamole.AudioPlayer.getInstance(stream, mimetype);
 
     const dpr = window.devicePixelRatio || 1;
+    // A fixed-size device (see devices.js) is the same desktop on every screen:
+    // a phone gets it letterboxed by Fit instead of a desktop reshaped to the
+    // phone. guacd lets these parameters override the token's, so they must
+    // agree with it.
+    const fixed = activeDevice.size;
     gc.connect(
       `token=${encodeURIComponent(token)}` +
-      `&width=${Math.round(screenEl.clientWidth * dpr)}` +
-      `&height=${Math.round(screenEl.clientHeight * dpr)}&dpi=96`,
+      `&width=${fixed ? fixed.w : Math.round(screenEl.clientWidth * dpr)}` +
+      `&height=${fixed ? fixed.h : Math.round(screenEl.clientHeight * dpr)}&dpi=96`,
     );
   }
 

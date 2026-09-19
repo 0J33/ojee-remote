@@ -56,6 +56,14 @@ const MONITOR_MODES = new Set(['portal', 'multimon', 'single', 'primary-switch']
  */
 const TRANSPORTS = new Set(['agent', 'rdp', 'vnc']);
 
+/** "1920x1080" -> {w, h}; anything else -> null (the browser's size is used). */
+function parseSize(v) {
+  const m = /^\s*(\d{3,4})\s*x\s*(\d{3,4})\s*$/i.exec(String(v ?? ''));
+  if (!m) return null;
+  const w = Number(m[1]); const h = Number(m[2]);
+  return w >= 640 && h >= 480 && w <= 8192 && h <= 8192 ? { w, h } : null;
+}
+
 export class DeviceRegistry {
   /**
    * @param {object} opts
@@ -130,6 +138,11 @@ export class DeviceRegistry {
         // silently became NLA — which xrdp refuses without a password, so the
         // session died before its login screen could appear.
         security: d.security || '',
+        // A fixed desktop size for a machine whose screen is created per
+        // session (xrdp). Without it the desktop is made at whatever size the
+        // connecting browser reports, so a phone in portrait gets a tall,
+        // narrow desktop and every device rearranges the icons. "1920x1080".
+        size: parseSize(d.size),
         monitors,
         agent: d.agent ? { url: String(d.agent.url).replace(/\/+$/, ''), token: d.agent.token || '' } : null,
         /**
@@ -188,6 +201,8 @@ export class DeviceRegistry {
       // the other path instead of showing a black screen and a frame counter.
       // A boolean only — the credentials behind it never leave this process.
       hasFallback: !!d.fallback,
+      // Not a secret: the client needs it to request the same size.
+      size: d.size,
       online: p.online,
       since: p.since,
       latencyMs: p.latencyMs,
