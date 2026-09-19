@@ -492,6 +492,47 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     );
   }
 
+  // Restored. Both were deleted by accident along with loadDevices(), which
+  // sat directly above them: the removal cut everything up to the next
+  // function it recognised, and checked only that the cut CONTAINED the dead
+  // code, not that it contained nothing else. bootSession() calls
+  // renderDeviceChips() before connect(), so every session stopped at
+  // "connecting…" — for every device. `npm run lint` now catches this.
+  function renderDeviceChips() {
+    root.querySelector('#rd-devices-group').hidden = devices.length <= 1;
+    devicesEl.innerHTML = '';
+    devices.forEach((d) => {
+      const b = document.createElement('button');
+      b.className = 'rs-chip' + (activeDevice && d.id === activeDevice.id ? ' on' : '');
+      b.textContent = d.name;
+      b.title = d.local ? 'this host' : 'remote (over Tailscale)';
+      b.onclick = () => switchDevice(d);
+      devicesEl.appendChild(b);
+    });
+  }
+
+  async function switchDevice(d) {
+    if (!d || (activeDevice && d.id === activeDevice.id)) return;
+    activeDevice = d;
+    focusedMonitor = null;
+    monitors = [];
+    resetView();
+    renderDeviceChips();
+    renderMonitorChips();
+    if (client) {
+      userSwitchedDevice = true;
+      client.disconnect();
+      client = null;
+      rfb = null;
+    }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // A new machine starts with a fresh budget of retries and no stale reason
+    // or blocker left over from the one you just left.
+    connectionOk();
+    await connect();
+  }
+
+  // ── monitors ──────────────────────────────────────────────────────────
   async function loadMonitors() {
     if (!activeDevice) return;
     // An agent session already knows the layout: the stream carries it, in

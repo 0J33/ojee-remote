@@ -1,0 +1,16 @@
+{
+  "root": true,
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" },
+  "rules": { "no-undef": "error" },
+  "overrides": [
+    {
+      "files": ["ui/**/*.js"],
+      "env": { "browser": true, "es2022": true },
+      "globals": { "Guacamole": "readonly", "VideoDecoder": "readonly", "EncodedVideoChunk": "readonly" }
+    },
+    {
+      "files": ["src/**/*.js", "tests/**/*.js"],
+      "env": { "node": true, "es2022": true }
+    }
+  ]
+}
