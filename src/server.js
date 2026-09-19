@@ -99,13 +99,14 @@ app.get('/api/health', (_req, res) => {
   const list = devices.list();
   const online = list.filter((d) => d.online === true);
   res.json({
-    // Not ok when nothing is reachable: the console then shows this module as
-    // degraded with the reason, instead of a nav entry that leads to a dead
-    // screen. A dual-boot pair means at most one of the two is ever up, so
-    // "some online" is the healthy state, not "all".
-    ok: online.length > 0,
-    reason: online.length ? null
-      : `no device reachable (${list.map((d) => d.name).join(', ')})`,
+    // Health is about THIS service. It used to be `online.length > 0`, which
+    // made the gateway report itself broken whenever the laptop was switched
+    // off — so the console greyed the module out, pointed its nav entry at
+    // Settings, and the phone announced "Remote is unreachable" every time
+    // the laptop went in a bag. The gateway was fine throughout. Which
+    // devices are reachable is in the summary, where it is information.
+    ok: true,
+    reason: null,
     devices: list.length,
     online: online.length,
     transports: {
@@ -142,15 +143,20 @@ app.get('/api/summary', (_req, res) => {
     unknown.length ? { k: 'Not probed yet', v: unknown.map((d) => d.name).join(', ') } : null,
   ].filter(Boolean).slice(0, 4);
 
+  // A device being off is not something this module can fix or should warn
+  // about: every device here is a personal machine you connect to when you
+  // want it, and a laptop being shut down is how laptops are used. Whether a
+  // machine is healthy is fleet's question. This card says what you could
+  // connect to right now, and stays quiet about the rest.
   res.json({
-    status: online.length ? 'ok' : 'warn',
+    status: 'ok',
     headline: online.length
       ? `${online.length} of ${list.length} reachable`
-      : 'nothing reachable',
+      : list.length === 1
+        ? `${list[0].name} is offline`
+        : 'nothing to connect to right now',
     facts,
-    alerts: online.length ? [] : [{
-      text: 'No device is reachable', severity: 'warn', view: 'screen',
-    }],
+    alerts: [],
   });
 });
 
