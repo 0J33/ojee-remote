@@ -65,12 +65,35 @@ if missing:
     print("  missing: " + ", ".join(missing))
     print("  install with: sudo apt install " + " ".join(missing))
     sys.exit(1)
+
+# Present is not the same as usable. Ubuntu 22.04 ships websockets 9.1 for
+# Python 3.10, and 9.1 predates 3.10: every incoming connection dies inside
+# the library with "the *loop* parameter was removed from Lock()", silently,
+# and the agent looks up while resetting every request. 10.0 is the release
+# that added 3.10 support.
+import websockets
+major = int(websockets.__version__.split(".")[0])
+if major < 10 and sys.version_info >= (3, 10):
+    print(f"  websockets {websockets.__version__} cannot serve on Python "
+          f"{sys.version_info.major}.{sys.version_info.minor} — it needs 10 or newer.")
+    print("  install with:  sudo apt install python3-pip && "
+          "python3 -m pip install --user 'websockets==10.4'")
+    print("  (and `sudo apt remove python3-websockets` so the old one is not picked up)")
+    sys.exit(1)
 PY
 ok "python modules present"
 
 if ! gst-inspect-1.0 pipewiresrc >/dev/null 2>&1; then
   die "gstreamer's pipewiresrc is missing — sudo apt install gstreamer1.0-pipewire"
 fi
+
+# Every stream goes through h264parse, whichever encoder made it. It lives in
+# plugins-bad, which a desktop install does not always have — and without it
+# the agent starts, reports healthy, and fails every connection.
+if ! gst-inspect-1.0 h264parse >/dev/null 2>&1; then
+  die "gstreamer's h264parse is missing — sudo apt install gstreamer1.0-plugins-bad"
+fi
+ok "h264parse present"
 ok "pipewiresrc present"
 
 # Encoders are a fallback chain, so a missing hardware encoder is a warning.
@@ -78,6 +101,9 @@ if gst-inspect-1.0 vaapih264enc >/dev/null 2>&1; then
   ok "vaapih264enc present (hardware encoding)"
 elif gst-inspect-1.0 x264enc >/dev/null 2>&1; then
   warn "no VAAPI encoder — falling back to x264enc (software, more CPU)"
+  # Software encoding is where the lag comes from on a laptop CPU: it cost the
+  # HP box ~180% CPU for an idle desktop. With an Intel iGPU, this is the fix.
+  warn "  with an Intel GPU: sudo apt install gstreamer1.0-vaapi   (then restart the agent)"
 else
   die "no H.264 encoder — sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-ugly"
 fi

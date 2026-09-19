@@ -53,6 +53,41 @@ BITRATE_MAX = 8000
 BITRATE_START = 2500
 
 
+_ENCODE_PROBES: dict[str, bool] = {}
+
+
+def _encodes(name: str, fragment: str) -> bool:
+    """Does this encoder configuration actually produce H.264 here?
+
+    Run once per configuration per process: two NV12 frames from a test
+    source, through the encoder, to a fake sink. Cheap (tens of milliseconds)
+    and decisive, where "the element exists" and "the pipeline reached
+    PLAYING" both say yes to an encoder that then fails on its first frame.
+    """
+    if name in _ENCODE_PROBES:
+        return _ENCODE_PROBES[name]
+    ok = False
+    pipe = None
+    try:
+        # bitrate values are irrelevant to whether the mode exists
+        pipe = Gst.parse_launch(
+            "videotestsrc num-buffers=2 ! "
+            "video/x-raw,format=NV12,width=320,height=240,framerate=30/1 ! "
+            f"{fragment} ! fakesink")
+        pipe.set_state(Gst.State.PLAYING)
+        msg = pipe.get_bus().timed_pop_filtered(
+            5 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+        ok = msg is not None and msg.type == Gst.MessageType.EOS
+    except Exception:                                   # noqa: BLE001
+        ok = False
+    finally:
+        if pipe is not None:
+            pipe.set_state(Gst.State.NULL)
+    _ENCODE_PROBES[name] = ok
+    print(f"[encode] {name}: {'usable' if ok else 'not available on this GPU'}", flush=True)
+    return ok
+
+
 def _encoder_candidates(bitrate: int = BITRATE_START) -> list[tuple[str, str]]:
     """Encoders to try, best first, as (name, launch fragment).
 
@@ -77,10 +112,31 @@ def _encoder_candidates(bitrate: int = BITRATE_START) -> list[tuple[str, str]]:
     """
     out = []
     if Gst.ElementFactory.find("vaapih264enc"):
-        out.append(("vaapih264enc", (
-            f"vaapih264enc name=enc rate-control=cbr bitrate={bitrate} "
-            f"keyframe-period=60 max-bframes=0"
-        )))
+        # Three ways of asking the same iGPU, because Intel generations
+        # disagree about which ones exist:
+        #
+        #   default     full encoder, bitrate-controlled. The reference laptop.
+        #   low-power   some chips ship ONLY the low-power encoder (the HP box's
+        #               Ice Lake exposes just VAEntrypointEncSliceLP), so the
+        #               default request fails there, every time.
+        #   lp + cqp    and low-power CBR needs the GPU's HuC firmware loaded
+        #               (i915.enable_guc=2 and a reboot). Without it only
+        #               constant-quality works — no live bitrate control, but
+        #               the encode is still on the GPU, which is the point:
+        #               software x264 cost that box ~180% CPU for an idle desk.
+        #
+        # Each is proven on a two-frame dummy pipeline before it is offered
+        # (_encodes), because with a live source a format mismatch surfaces on
+        # the first frame, after the start-up check has already passed.
+        vaapi = [
+            ("vaapih264enc", f"vaapih264enc name=enc rate-control=cbr bitrate={bitrate} "
+                             f"keyframe-period=60 max-bframes=0"),
+            ("vaapih264enc-lp", f"vaapih264enc name=enc tune=low-power rate-control=cbr "
+                                f"bitrate={bitrate} keyframe-period=60 max-bframes=0"),
+            ("vaapih264enc-lp-cqp", "vaapih264enc name=enc tune=low-power rate-control=cqp "
+                                    "init-qp=26 keyframe-period=60 max-bframes=0"),
+        ]
+        out.extend((name, frag) for name, frag in vaapi if _encodes(name, frag))
     out.append(("x264enc", (
         # tune=zerolatency disables B-frames and lookahead. Without it x264
         # buffers several frames ahead, which reads as a broken connection
