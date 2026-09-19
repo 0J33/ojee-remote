@@ -27,6 +27,9 @@
    Mouse coordinates are framebuffer pixels = desktop pixels.
    ============================================================ */
 
+import { spsSize } from './h264.js';
+
+
 /* ── which decode path this browser can actually use ─────────────────── */
 
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent)
@@ -461,6 +464,7 @@ export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, 
   let layout = { active: null, desktop: { w: 1920, h: 1080 }, monitors: [], frameW: 0, frameH: 0 };
   let fb = { w: 1920, h: 1080 };        // framebuffer = what the stream covers, desktop px
   let sps = null, pps = null, avcc = null;
+  let coded = null;                     // {w, h} from the SPS — what the frames really are
   let closed = false, failed = false;
 
   function fail(detail) {
@@ -493,6 +497,7 @@ export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, 
     view.style.height = `${fb.h}px`;
     // New geometry means a new SPS; forget the old parameter sets.
     sps = pps = avcc = null;
+    coded = null;
     onLayout?.(layout);
   }
 
@@ -530,12 +535,19 @@ export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, 
       // Safari's decoder rejects the whole sample over them.
       else if (t !== 9 && t !== 12) picture.push(u);
     }
-    if (codecChanged && sps && pps) avcc = buildAvcC(sps, pps);
+    if (codecChanged && sps && pps) {
+      avcc = buildAvcC(sps, pps);
+      coded = spsSize(sps);
+    }
     if (!avcc || !picture.length) return;
 
     try {
       const r = await renderer.push({
-        key, avcc, codecChanged, w: layout.frameW, h: layout.frameH, sample: toAvcc(picture),
+        // The SPS, not the announced layout: on a scaled monitor the agent
+        // announces the logical size and encodes the physical one (see h264.js).
+        key, avcc, codecChanged,
+        w: coded?.w || layout.frameW, h: coded?.h || layout.frameH,
+        sample: toAvcc(picture),
       });
       if (r === 'want-key') send({ t: 'keyframe' });
     } catch (e) {
