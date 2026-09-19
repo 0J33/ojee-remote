@@ -109,12 +109,19 @@ export function createShellBridge({ devices, log = console } = {}) {
     };
 
     const url = new URL(req.url, 'http://x');
-    const cols = clamp(url.searchParams.get('cols'), 20, MAX_COLS, 80);
-    const rows = clamp(url.searchParams.get('rows'), 5, MAX_ROWS, 24);
+    // Mutable: a resize can arrive before the PTY exists, and the size the
+    // shell is created with should be the latest one, not the stale one.
+    let cols = clamp(url.searchParams.get('cols'), 20, MAX_COLS, 80);
+    let rows = clamp(url.searchParams.get('rows'), 5, MAX_ROWS, 24);
 
     let conn = null;
     let stream = null;
     let closed = false;
+    // Keystrokes that arrive before the PTY is open. Dialling takes a second
+    // or two over a tailnet, and a paste or a fast first command in that
+    // window would otherwise be silently dropped — the same reason the agent
+    // proxy queues frames until its upstream is ready.
+    const pending = [];
 
     const shutdown = (code, reason) => {
       if (closed) return;
@@ -151,6 +158,7 @@ export function createShellBridge({ devices, log = console } = {}) {
           return;
         }
         stream = ch;
+        for (const chunk of pending.splice(0)) stream.write(chunk);
         say('ready');
 
         stream.on('data', (d) => {
@@ -178,14 +186,18 @@ export function createShellBridge({ devices, log = console } = {}) {
 
     client.on('message', (data, isBinary) => {
       if (isBinary) {
-        stream?.write(data);
+        if (stream) stream.write(data);
+        // Cap the queue: a client that floods before the PTY exists must not
+        // grow the gateway's memory without bound.
+        else if (pending.length < 64) pending.push(Buffer.from(data));
         return;
       }
       let msg;
       try { msg = JSON.parse(data.toString()); } catch { return; }
-      if (msg?.t === 'resize' && stream) {
-        stream.setWindow(clamp(msg.rows, 5, MAX_ROWS, rows), clamp(msg.cols, 20, MAX_COLS, cols), 0, 0);
-      }
+      if (msg?.t !== 'resize') return;
+      rows = clamp(msg.rows, 5, MAX_ROWS, rows);
+      cols = clamp(msg.cols, 20, MAX_COLS, cols);
+      stream?.setWindow(rows, cols, 0, 0);
     });
     client.on('close', () => shutdown(1000, 'client_closed'));
     client.on('error', () => shutdown(1011, 'client_error'));

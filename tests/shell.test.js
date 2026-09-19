@@ -17,7 +17,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { connectOptions, expandHome, keyFingerprint } from '../src/shell.js';
+import { connectOptions, expandHome, keyFingerprint, createShellBridge } from '../src/shell.js';
 
 const tmp = mkdtempSync(join(tmpdir(), 'ojee-shell-'));
 const KEY = join(tmp, 'id_test');
@@ -102,4 +102,44 @@ test('the fingerprint is the one OpenSSH prints', () => {
   assert.ok(!fp.endsWith('='));
   assert.equal(fp, keyFingerprint(Buffer.from('ssh-ed25519 AAAA')));
   assert.notEqual(fp, keyFingerprint(Buffer.from('ssh-ed25519 BBBB')));
+});
+
+/* ── upgrade routing ─────────────────────────────────────────────────────
+   The bridge shares the server's `upgrade` event with the agent proxy and
+   guacd, so it has to claim exactly its own path and leave the rest alone —
+   returning true for someone else's upgrade would 404 a working session. */
+
+/** A socket that records what was written to it instead of being one. */
+function fakeSocket() {
+  const sock = { written: '', destroyed: false };
+  sock.write = (s) => { sock.written += s; return true; };
+  sock.destroy = () => { sock.destroyed = true; };
+  return sock;
+}
+
+const registry = {
+  get: (id) => ({
+    box: { id: 'box', ssh: { host: 'h', port: 22, username: 'me', password: 'x' } },
+    screenonly: { id: 'screenonly', ssh: null },
+  }[id] || null),
+};
+
+test('only /shell is claimed', () => {
+  const bridge = createShellBridge({ devices: registry });
+  const sock = fakeSocket();
+  assert.equal(bridge.handleUpgrade({ url: '/guac?token=x' }, sock, Buffer.alloc(0)), false);
+  assert.equal(bridge.handleUpgrade({ url: '/stream?device=box' }, sock, Buffer.alloc(0)), false);
+  assert.equal(sock.written, '', 'another handler\'s upgrade must be untouched');
+  bridge.close();
+});
+
+test('a device with no shell is a 404, not a hanging socket', () => {
+  const bridge = createShellBridge({ devices: registry });
+  for (const url of ['/shell?device=nope', '/shell?device=screenonly', '/shell']) {
+    const sock = fakeSocket();
+    assert.equal(bridge.handleUpgrade({ url }, sock, Buffer.alloc(0)), true, url);
+    assert.match(sock.written, /^HTTP\/1\.1 404 /, url);
+    assert.equal(sock.destroyed, true, url);
+  }
+  bridge.close();
 });
