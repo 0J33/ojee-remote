@@ -347,8 +347,7 @@ a:hover { color: var(--accent); }
 
 .ic {
   width: 16px; height: 16px; flex: none;
-  fill: none; stroke: currentColor;
-  stroke-width: 1.5; stroke-linecap: square; stroke-linejoin: miter;
+  fill: currentColor; stroke: none;
 }
 .ic--lg { width: 22px; height: 22px; }
 .ic--xl { width: 30px; height: 30px; }

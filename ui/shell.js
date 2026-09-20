@@ -87,9 +87,7 @@ export function startShell({ host, ctx, deviceId, deviceName, onExit }) {
     <section class="sh">
       <header class="rd-bar sh-bar">
         <button class="rs-icon" data-act="exit" title="Back to devices" aria-label="Back to devices">
-          <svg viewBox="0 0 24 24" class="ic" aria-hidden="true">
-            <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" d="M15 5 L8 12 L15 19"/>
-          </svg>
+          ${ctx.icon('i-back', 'ic')}
         </button>
         <div class="rd-status sh-state" data-kind="info">
           <b class="rd-state-label">connecting</b>
@@ -98,10 +96,7 @@ export function startShell({ host, ctx, deviceId, deviceName, onExit }) {
         <div class="rd-controls">
           <button class="rs-chip" data-act="keys" title="Special keys">Keys</button>
           <button class="rs-icon" data-act="kbd" title="Show keyboard" aria-label="Show keyboard">
-            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true">
-              <rect x="2" y="6" width="20" height="12" fill="none" stroke="currentColor" stroke-width="1.6"/>
-              <path fill="currentColor" d="M5 9h2v2H5zM8 9h2v2H8zM11 9h2v2h-2zM14 9h2v2h-2zM17 9h2v2h-2zM5 12h2v2H5zM8 12h8v2H8zM17 12h2v2h-2z"/>
-            </svg>
+            ${ctx.icon('i-keyboard', 'ic')}
           </button>
           <button class="rs-chip" data-act="reconnect" title="Reconnect">Reconnect</button>
         </div>

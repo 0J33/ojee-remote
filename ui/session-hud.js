@@ -74,17 +74,11 @@ export function hudMarkup() {
 
       <div class="rs-hud-actions">
         <button id="rd-hide" class="rs-icon" title="Hide controls" aria-label="Hide controls">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"
-                  d="M5 9 L12 16 L19 9"/>
-          </svg>
+          <svg class="ic" aria-hidden="true"><use href="#i-hide"></use></svg>
         </button>
         <button id="rd-exit" class="rs-icon rs-icon--danger" title="Exit to devices"
                 aria-label="Exit to devices">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"
-                  d="M14 5 H19 V19 H14 M14 12 H4 M8 8 L4 12 L8 16"/>
-          </svg>
+          <svg class="ic" aria-hidden="true"><use href="#i-exit"></use></svg>
         </button>
       </div>
     </aside>
@@ -127,10 +121,7 @@ export function hudMarkup() {
     </aside>
 
     <button id="rd-reveal" class="rs-reveal" aria-label="Show controls">
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-        <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"
-              d="M5 9 L12 16 L19 9" transform="rotate(180 12 12)"/>
-      </svg>
+      <svg class="ic" aria-hidden="true"><use href="#i-show"></use></svg>
     </button>
   </div>`;
 }

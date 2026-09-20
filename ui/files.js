@@ -94,12 +94,12 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
     <section class="fs">
       <header class="fs-bar">
         <button class="rs-icon" data-act="exit" title="Back to devices" aria-label="Back to devices">
-          <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" d="M15 5 L8 12 L15 19"/></svg>
+          ${ctx.icon('i-back', 'ic')}
         </button>
         <nav class="fs-crumbs" aria-label="Path"></nav>
         <div class="fs-tools">
           <label class="fs-search">
-            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5 L21 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"/></svg>
+            ${ctx.icon('i-search', 'ic')}
             <input class="input fs-search-input" type="search" placeholder="Filter" aria-label="Filter this folder" />
           </label>
           <button class="rs-chip" data-act="refresh" title="Refresh">Refresh</button>
