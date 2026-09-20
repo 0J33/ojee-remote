@@ -49,6 +49,12 @@
 .sh-keys::-webkit-scrollbar { display: none; }
 .sh-keys .rs-chip { flex: 0 0 auto; }
 
+/* An icon button in the bar is the same 34px square as the back chevron, and
+   its glyph is drawn at the icon size rather than left at whatever a font
+   decides — a ⌨ emoji rendered about a third the height of the text beside
+   it and read as a broken button. */
+.sh-bar .rs-icon .ic { width: 17px; height: 17px; }
+
 .sh-term {
   flex: 1 1 auto;
   min-height: 0;

@@ -97,7 +97,12 @@ export function startShell({ host, ctx, deviceId, deviceName, onExit }) {
         </div>
         <div class="rd-controls">
           <button class="rs-chip" data-act="keys" title="Special keys">Keys</button>
-          <button class="rs-chip" data-act="kbd" title="Show keyboard" aria-label="Show keyboard">⌨</button>
+          <button class="rs-icon" data-act="kbd" title="Show keyboard" aria-label="Show keyboard">
+            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true">
+              <rect x="2" y="6" width="20" height="12" fill="none" stroke="currentColor" stroke-width="1.6"/>
+              <path fill="currentColor" d="M5 9h2v2H5zM8 9h2v2H8zM11 9h2v2h-2zM14 9h2v2h-2zM17 9h2v2h-2zM5 12h2v2H5zM8 12h8v2H8zM17 12h2v2h-2z"/>
+            </svg>
+          </button>
           <button class="rs-chip" data-act="reconnect" title="Reconnect">Reconnect</button>
         </div>
       </header>
