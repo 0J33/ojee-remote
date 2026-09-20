@@ -329,3 +329,51 @@
 body.rd-faux-lock { overflow: hidden; }
 
 .rd-foot #rd-exit, .rd-foot #rd-full { flex: none; }
+
+/* ============================================================
+   SHARED CONTROLS
+   Chips and icon buttons. They started in session.css because the
+   HUD was the only thing that had them; the Shell key row and the
+   Files toolbar then grew their own rounded, hard-coded copies and
+   the two views stopped looking like the rest of the module. One
+   definition, in the stylesheet every view already loads.
+   ============================================================ */
+.rs-chips { display: flex; gap: 2px; flex-wrap: wrap; }
+
+/* ---------- chips ---------- */
+/* 34px, not 44: this bar carries 13 keys plus F-keys plus modifiers, and at
+   44 they do not fit a phone at all. They are dense by necessity, spaced 2px,
+   and the trackpad — not these — is the primary input. */
+.rs-chip {
+  min-height: 34px; min-width: 34px;
+  padding: 0 9px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer; transition: var(--t);
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+}
+.rs-chip:hover { border-color: var(--line-hover); color: var(--ink); background: var(--accent-03); }
+.rs-chip:active { background: var(--accent-08); }
+.rs-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rs-chip.on { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
+.rs-chip[disabled], .rs-chip[data-offline="1"] { opacity: 0.45; cursor: not-allowed; }
+/* The one chip that should give you pause before you press it. Shared,
+   because Delete lives in the Files view and Ctrl-Alt-Del in the HUD. */
+.rs-chip--warn { border-color: var(--warn); color: var(--warn); }
+.rs-chip--warn:hover { background: var(--warn); color: var(--on-accent); border-color: var(--warn); }
+
+.rs-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  cursor: pointer; transition: var(--t);
+}
+.rs-icon:hover { border-color: var(--line-hover); color: var(--ink); }
+.rs-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rs-icon--danger:hover { border-color: var(--err); color: var(--err); background: var(--err-wash); }

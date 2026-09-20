@@ -30,17 +30,22 @@
 .rs-screen:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ---------- floating overlays ---------- */
+/* The surface itself is shared — see "shared controls" in remote.css. What is
+   session-only is that these two float over the desktop rather than sit in a
+   column, so the positioning rides with the modifiers. */
 .rs-hud {
-  position: fixed;
-  left: max(10px, calc(env(safe-area-inset-left, 0px) + 10px));
-  right: max(10px, calc(env(safe-area-inset-right, 0px) + 10px));
-  max-width: 920px;
-  margin-inline: auto;
   background: var(--chrome-surface);
   border: 1px solid var(--line-strong);
   -webkit-backdrop-filter: var(--chrome-blur);
   backdrop-filter: var(--chrome-blur);
   transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.rs-hud--top, .rs-hud--bottom {
+  position: fixed;
+  left: max(10px, calc(env(safe-area-inset-left, 0px) + 10px));
+  right: max(10px, calc(env(safe-area-inset-right, 0px) + 10px));
+  max-width: 920px;
+  margin-inline: auto;
   z-index: 10;
 }
 .rs-hud--top {
@@ -77,29 +82,6 @@
   font-family: var(--hud); font-size: 0.55rem;
   letter-spacing: 0.18em; text-transform: uppercase; color: var(--dim);
 }
-.rs-chips { display: flex; gap: 2px; flex-wrap: wrap; }
-
-/* ---------- chips ---------- */
-/* 34px, not 44: this bar carries 13 keys plus F-keys plus modifiers, and at
-   44 they do not fit a phone at all. They are dense by necessity, spaced 2px,
-   and the trackpad — not these — is the primary input. */
-.rs-chip {
-  min-height: 34px; min-width: 34px;
-  padding: 0 9px;
-  background: var(--panel);
-  border: 1px solid var(--line-strong);
-  color: var(--ink-2);
-  font-family: var(--mono); font-size: 0.66rem; font-weight: 700;
-  letter-spacing: 0.06em;
-  cursor: pointer; transition: var(--t);
-  touch-action: manipulation;
-  -webkit-user-select: none; user-select: none;
-}
-.rs-chip:hover { border-color: var(--line-hover); color: var(--ink); background: var(--accent-03); }
-.rs-chip:active { background: var(--accent-08); }
-.rs-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.rs-chip.on { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
-.rs-chip[disabled], .rs-chip[data-offline="1"] { opacity: 0.45; cursor: not-allowed; }
 
 /* Modifiers are tri-state and each state must be distinguishable WITHOUT
    colour: armed carries a dashed edge, locked is filled. */
@@ -109,21 +91,7 @@
   color: var(--accent);
   background: var(--accent-08);
 }
-.rs-chip--warn { border-color: var(--warn); color: var(--warn); }
-.rs-chip--warn:hover { background: var(--warn); color: var(--on-accent); }
 .rs-chip--kbd { border-color: var(--accent); color: var(--accent); }
-
-.rs-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; height: 34px;
-  background: var(--panel);
-  border: 1px solid var(--line-strong);
-  color: var(--ink-2);
-  cursor: pointer; transition: var(--t);
-}
-.rs-icon:hover { border-color: var(--line-hover); color: var(--ink); }
-.rs-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.rs-icon--danger:hover { border-color: var(--err); color: var(--err); background: var(--err-wash); }
 
 /* ---------- bottom rows ---------- */
 .rs-row { display: flex; gap: 2px; }

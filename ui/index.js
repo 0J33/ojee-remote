@@ -64,6 +64,7 @@ function ensureIcons() {
   };
   add('i-terminal', '<rect x="3" y="4" width="18" height="16"/><path d="M7 9l3 3-3 3M13 15h4"/>');
   add('i-folder', '<path d="M3 6h6l2 2.5h10V19H3z"/>');
+  add('i-file', '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>');
 }
 
 /* ── chooser ──────────────────────────────────────────────────────────── */

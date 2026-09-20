@@ -1,97 +1,65 @@
-/* The Shell view. A terminal fills the panel; the chrome above it is one
-   row so a phone keeps its screen for the terminal. */
+/* ============================================================
+   ojee-remote — the Shell view.
+
+   Layout only. The frame, the bar and the key row are the module's
+   own primitives — `.rd-bar` / `.rd-status` from remote.css for the
+   chrome, `.rs-chip` / `.rs-icon` for the controls — so a terminal
+   sits next to a desktop without announcing that it was written
+   later. This file used to carry its own rounded, pixel-sized,
+   hard-coded-grey copies of all three, which is exactly what made
+   the view look borrowed from another app.
+   ============================================================ */
 
 .sh {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  /* Same as the files view: usable whether or not the host sizes us. */
-  max-height: calc(100dvh - 140px);
+  gap: 2px;
+  /* Same bound as the Screen view's stage: height rather than min-height, so
+     the terminal fits the viewport instead of growing past it and taking the
+     page's scrollbar with it. */
+  height: calc(100dvh - 200px);
+  max-height: calc(100dvh - 200px);
   min-height: 0;
-  background: var(--bg-1);
-  border: 1px solid var(--line);
-  border-radius: var(--r, 10px);
-  overflow: hidden;
 }
 
-.sh-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-2, var(--bg-1));
-  min-width: 0;
-}
-.sh-back {
-  display: grid;
-  place-items: center;
-  width: 30px; height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink);
-  flex: 0 0 auto;
-}
-.sh-back:hover { border-color: var(--line-hover); background: var(--accent-03); }
+/* The bar is .rd-bar; this only adds what a terminal needs on top of it. */
+.sh-bar { flex: none; }
 .sh-name {
-  font-size: 13px;
+  font-family: var(--mono);
+  font-size: 0.68rem; font-weight: 900;
+  letter-spacing: 1px; text-transform: uppercase;
+  color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0;
 }
-.sh-state {
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 11px;
-  letter-spacing: .02em;
-  color: var(--ink-2, #8b949e);
-  white-space: nowrap;
-}
-.sh-state[data-state="connected"] { color: var(--ok, #3fb950); }
-.sh-state[data-state="error"],
-.sh-state[data-state="disconnected"] { color: var(--err, #f85149); }
-.sh-actions { margin-left: auto; display: flex; gap: 4px; flex: 0 0 auto; }
-.sh-btn {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink);
-  font-size: 12px;
-  padding: 5px 9px;
-}
-.sh-btn:hover { border-color: var(--line-hover); background: var(--accent-03); }
 
-/* The key row: only what a touchscreen genuinely cannot send. */
+/* The key row: only what a touchscreen genuinely cannot send. Scrolls
+   sideways rather than wrapping, so it never steals a second row from the
+   terminal on a phone. */
 .sh-keys {
+  flex: none;
   display: flex;
-  gap: 4px;
+  gap: 2px;
   padding: 6px 8px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
   scrollbar-width: none;
 }
 .sh-keys::-webkit-scrollbar { display: none; }
-.sh-key {
-  flex: 0 0 auto;
-  min-width: 42px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 12px;
-}
-.sh-key:active { background: var(--accent-08); }
+.sh-keys .rs-chip { flex: 0 0 auto; }
 
 .sh-term {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 6px 4px 4px 8px;
+  padding: var(--s-2) 6px 6px var(--s-2);
+  background: var(--bg-0);
+  border: 1px solid var(--line-2);
 }
 .sh-term .xterm { height: 100%; }
 .sh-term .xterm-viewport { overflow-y: auto; }
 
 @media (max-width: 560px) {
+  .sh { height: calc(100dvh - 150px); max-height: calc(100dvh - 150px); }
   .sh-name { display: none; }
-  .sh-btn { padding: 5px 7px; }
 }

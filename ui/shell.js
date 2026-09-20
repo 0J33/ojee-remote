@@ -74,25 +74,35 @@ const KEYS = [
  * @param {Function} o.onExit       back to the chooser
  * @returns {Function} teardown
  */
+/** Connection state → the status dot's colour, as the Screen view uses it. */
+const KIND = {
+  connecting: 'info', reconnecting: 'info',
+  connected: 'ok', ready: 'ok',
+  closed: 'warn', disconnected: 'warn',
+  error: 'err',
+};
+
 export function startShell({ host, ctx, deviceId, deviceName, onExit }) {
   host.innerHTML = `
     <section class="sh">
-      <header class="sh-bar">
-        <button class="sh-back" data-act="exit" title="Back to devices" aria-label="Back to devices">
+      <header class="rd-bar sh-bar">
+        <button class="rs-icon" data-act="exit" title="Back to devices" aria-label="Back to devices">
           <svg viewBox="0 0 24 24" class="ic" aria-hidden="true">
             <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" d="M15 5 L8 12 L15 19"/>
           </svg>
         </button>
-        <b class="sh-name">${ctx.esc(deviceName || deviceId)}</b>
-        <span class="sh-state" data-state="connecting">connecting…</span>
-        <div class="sh-actions">
-          <button class="sh-btn" data-act="keys" title="Special keys">Keys</button>
-          <button class="sh-btn" data-act="kbd" title="Show keyboard">⌨</button>
-          <button class="sh-btn" data-act="reconnect" title="Reconnect">Reconnect</button>
+        <div class="rd-status sh-state" data-kind="info">
+          <b class="rd-state-label">connecting</b>
+          <span class="rd-state-detail sh-name">${ctx.esc(deviceName || deviceId)}</span>
+        </div>
+        <div class="rd-controls">
+          <button class="rs-chip" data-act="keys" title="Special keys">Keys</button>
+          <button class="rs-chip" data-act="kbd" title="Show keyboard" aria-label="Show keyboard">⌨</button>
+          <button class="rs-chip" data-act="reconnect" title="Reconnect">Reconnect</button>
         </div>
       </header>
-      <div class="sh-keys" hidden>
-        ${KEYS.map(([label], i) => `<button class="sh-key" data-key="${i}">${ctx.esc(label)}</button>`).join('')}
+      <div class="sh-keys rs-chips" hidden>
+        ${KEYS.map(([label], i) => `<button class="rs-chip" data-key="${i}">${ctx.esc(label)}</button>`).join('')}
       </div>
       <div class="sh-term"></div>
     </section>`;
@@ -111,7 +121,9 @@ export function startShell({ host, ctx, deviceId, deviceName, onExit }) {
   const setState = (state, detail) => {
     if (!stateEl) return;
     stateEl.dataset.state = state;
-    stateEl.textContent = detail ? `${state} · ${detail}` : state;
+    stateEl.dataset.kind = KIND[state] || 'info';
+    stateEl.querySelector('.rd-state-label').textContent = state;
+    stateEl.querySelector('.rd-state-detail').textContent = detail || deviceName || deviceId;
   };
 
   const sendSize = () => {
