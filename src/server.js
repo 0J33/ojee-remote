@@ -39,6 +39,7 @@ import { DeviceRegistry } from './devices.js';
 import { HostAgents } from './agents.js';
 import { createAgentProxy } from './agent-proxy.js';
 import { createShellBridge } from './shell.js';
+import { createFileService, sftpError } from './files.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
@@ -93,6 +94,9 @@ const MANIFEST = {
     // view here rather than a module of its own — one devices.json, one
     // presence poll, one set of credentials.
     { id: 'shell', label: 'Shell', icon: 'i-terminal' },
+    // Files ride the shell's SSH connection over SFTP: same dial, same
+    // credential, nothing extra installed on the far end.
+    { id: 'files', label: 'Files', icon: 'i-folder' },
   ],
   ui: '/ui/index.js',
   health: '/api/health',
@@ -397,6 +401,122 @@ app.get('/api/devices/:id/token', async (req, res) => {
   res.json({ token, protocol: target.protocol, monitors: target.monitors });
 });
 
+/* ── files over SFTP ────────────────────────────────────────────────────── */
+
+const files = createFileService({ devices });
+
+/** Resolve :id → a device with a shell, or answer why not. */
+function fileDevice(req, res) {
+  const d = devices.get(req.params.id);
+  if (!d) { res.status(404).json({ error: 'unknown_device' }); return null; }
+  if (!d.ssh) {
+    res.status(409).json({
+      error: 'no_shell',
+      detail: `${d.name} has no ssh block in devices.json — files come over SFTP`,
+    });
+    return null;
+  }
+  return d;
+}
+
+/** One place to turn an SFTP failure into an HTTP one. */
+function fileFail(res, e) {
+  const { http, code, detail } = sftpError(e);
+  if (res.headersSent) { res.destroy(); return; }
+  res.status(e.http || http).json({ error: code, detail });
+}
+
+app.get('/api/devices/:id/fs', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  try { res.json(await files.list(d, req.query.path)); } catch (e) { fileFail(res, e); }
+});
+
+app.get('/api/devices/:id/fs/stat', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  try { res.json(await files.stat(d, req.query.path)); } catch (e) { fileFail(res, e); }
+});
+
+app.post('/api/devices/:id/fs/mkdir', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  try { res.json(await files.mkdir(d, req.body?.path)); } catch (e) { fileFail(res, e); }
+});
+
+app.post('/api/devices/:id/fs/move', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  const { from, to } = req.body || {};
+  if (!from || !to) return res.status(400).json({ error: 'from_and_to_required' });
+  try { res.json(await files.move(d, from, to)); } catch (e) { fileFail(res, e); }
+});
+
+app.post('/api/devices/:id/fs/delete', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  if (!req.body?.path) return res.status(400).json({ error: 'path_required' });
+  try { res.json(await files.remove(d, req.body.path, { recursive: !!req.body.recursive })); } catch (e) { fileFail(res, e); }
+});
+
+/**
+ * Download. Range is answered because a browser asks for it when a video is
+ * played from here, and because an interrupted download should resume rather
+ * than start again.
+ */
+app.get('/api/devices/:id/fs/download', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  try {
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    const head = await files.stat(d, req.query.path);
+    const size = head.size;
+    let start = 0; let end = size ? size - 1 : 0;
+    if (range) {
+      start = range[1] ? Number(range[1]) : 0;
+      end = range[2] ? Math.min(Number(range[2]), end) : end;
+      if (start > end) {
+        return res.status(416).set('content-range', `bytes */${size}`).end();
+      }
+    }
+    const { stream, name } = await files.read(d, req.query.path,
+      range ? { start, end } : {});
+
+    res.status(range ? 206 : 200);
+    res.set({
+      'content-type': 'application/octet-stream',
+      'content-length': String(range ? end - start + 1 : size),
+      'accept-ranges': 'bytes',
+      // filename* carries non-ASCII names; filename is the fallback.
+      'content-disposition': `attachment; filename="${name.replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      ...(range ? { 'content-range': `bytes ${start}-${end}/${size}` } : {}),
+    });
+    stream.on('error', (e) => { files.log.warn?.(`[files] download ${name}: ${e.message}`); res.destroy(); });
+    // A client that closes the tab mid-download must not leave the SFTP read
+    // stream running against the device.
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+  } catch (e) { fileFail(res, e); }
+});
+
+/**
+ * Upload, as a raw body rather than multipart: the browser streams the File
+ * straight through, so a 4 GB video never has to exist in memory on either
+ * end. `offset` resumes a partial upload — ask /fs/stat what arrived, send
+ * the rest.
+ */
+app.put('/api/devices/:id/fs/upload', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  const path = req.query.path;
+  if (!path) return res.status(400).json({ error: 'path_required' });
+  const offset = Number(req.query.offset) || 0;
+  try {
+    const { stream, path: p } = await files.write(d, path, { offset });
+    let failed = null;
+    stream.on('error', (e) => { failed = e; req.unpipe(stream); res.destroy(); });
+    req.on('aborted', () => stream.destroy());
+    req.pipe(stream);
+    stream.on('close', () => {
+      if (failed || res.headersSent) return;
+      res.json({ path: p, offset });
+    });
+  } catch (e) { fileFail(res, e); }
+});
+
 /* ── static: module UI + standalone shell ───────────────────────────────── */
 
 app.use('/ui', express.static(join(ROOT, 'ui'), {
@@ -489,6 +609,7 @@ server.listen(Number(PORT), HOST, () => {
 const shutdown = () => {
   devices.stop();
   shellBridge.close();
+  files.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 };

@@ -197,7 +197,10 @@ export class DeviceRegistry {
 
     for (const d of this.devices) {
       if (!this.presence.has(d.id)) {
-        this.presence.set(d.id, { online: null, since: null, latencyMs: null, checkedAt: 0, error: null });
+        this.presence.set(d.id, {
+          online: null, since: null, latencyMs: null, checkedAt: 0, error: null,
+          shell: d.ssh ? { online: null, latencyMs: null, error: null } : null,
+        });
       }
     }
     return this.devices;
@@ -225,6 +228,11 @@ export class DeviceRegistry {
       // Whether this device offers a terminal. The chooser needs it to know
       // which machines belong in the Shell view.
       hasShell: !!d.ssh,
+      // Presence for the shell / files views, which only need sshd. Null when
+      // the device has no ssh block at all.
+      shellOnline: p.shell ? p.shell.online : null,
+      shellLatencyMs: p.shell ? p.shell.latencyMs : null,
+      shellError: p.shell ? p.shell.error : null,
       // Whether a canvas-2D route exists for this device. The client needs to
       // know BEFORE it tries, so a browser that cannot decode H.264 can take
       // the other path instead of showing a black screen and a frame counter.
@@ -266,10 +274,10 @@ export class DeviceRegistry {
     return { host: device.host, port: device.port };
   }
 
-  probe(device) {
+  probe(device, target = null) {
     return new Promise((resolve) => {
       const started = Date.now();
-      const sock = connect(this.probeTarget(device));
+      const sock = connect(target || this.probeTarget(device));
       let settled = false;
 
       const done = (online, error) => {
@@ -287,11 +295,27 @@ export class DeviceRegistry {
   }
 
   async refresh(device) {
-    const r = await this.probe(device);
+    // A machine's screen and its shell fail independently: the host agent can
+    // be down while sshd answers, and the Shell and Files views are perfectly
+    // usable then. Probing only the screen reported those devices as offline
+    // and the chooser refused the click.
+    const [r, shell] = await Promise.all([
+      this.probe(device),
+      device.ssh && device.transport !== 'ssh'
+        ? this.probe(device, { host: device.ssh.host, port: device.ssh.port })
+        : Promise.resolve(null),
+    ]);
     const prev = this.presence.get(device.id) || {};
-    const flipped = prev.online !== r.online;
+    const shellState = device.ssh
+      ? (shell
+        ? { online: shell.online, latencyMs: shell.latencyMs, error: shell.error }
+        // For an ssh-transport device the main probe IS the shell probe.
+        : { online: r.online, latencyMs: r.latencyMs, error: r.error })
+      : null;
+    const flipped = prev.online !== r.online || (prev.shell?.online ?? null) !== (shellState?.online ?? null);
     this.presence.set(device.id, {
       online: r.online,
+      shell: shellState,
       // `since` answers "how long has it been up/down", which is the question
       // you actually have when a machine is misbehaving.
       since: flipped ? Date.now() : (prev.since ?? Date.now()),

@@ -1,6 +1,6 @@
 # ojee-remote
 
-Browser remote desktop over a tailnet, and a terminal on the same machines. Multi-monitor,
+Browser remote desktop over a tailnet, plus a terminal and that machine's files. Multi-monitor,
 presence-aware, and — the part that took the longest — **it never moves your primary display**.
 
 Runs standalone or as an [ojee-console](../ojee-console) module.
@@ -82,8 +82,18 @@ credentials on the gateway. A device can have both a screen and a shell; a headl
 
 Credentials stay on the gateway exactly like the RDP ones: `keyFile`, `password`, or neither — with
 neither, the gateway's own `ssh-agent` is used. Pin a host key with `ssh.fingerprint`; leave it out
-and the first connection logs the fingerprint it saw, so there is something to paste in. Files over
-SFTP will ride this same connection: one dial, one credential, one thing to get right.
+and the first connection logs the fingerprint it saw, so there is something to paste in.
+
+**Files ride that same connection.** SFTP is a subsystem of SSH, so the Files view needs no second
+port, no second credential and nothing installed on the far end — Windows included, the moment
+OpenSSH is enabled there. Connections are pooled per device and dropped after a minute idle:
+dialling costs a second or two over a tailnet and a file browser makes a request per click, so a
+connection per request would make every listing feel broken.
+
+**Screen and shell are up or down separately.** The host agent can be dead while sshd answers, so
+presence is probed for each: the Screen view asks about the agent (or RDP), Shell and Files ask
+about sshd. Probing only the screen reported those machines as offline and the chooser refused the
+click.
 ---
 
 ## Setup
@@ -235,6 +245,34 @@ End to end this was verified against a throwaway `sshd` on port 2222 with its ow
 fitted terminal, live resize through `setWindow`, `^C` interrupting a `sleep`, and the three
 failure paths — unknown device (404 on the upgrade), unreadable `keyFile`, and a mismatched pinned
 fingerprint — each arriving as a sentence in the terminal rather than a silent close.
+
+## Files
+
+The **Files** view lists that machine's filesystem over SFTP, opening where ssh drops you rather
+than at `/`. Navigate, upload (button or drag and drop), download, rename, make folders, delete.
+Transfers are a queue with progress rather than fire-and-forget, and uploads stream through the
+gateway, so a 4 GB video never sits in memory on either end.
+
+```
+GET  /api/devices/:id/fs?path=           one directory, dirs first
+GET  /api/devices/:id/fs/stat?path=      one entry
+GET  /api/devices/:id/fs/download?path=  Range supported, so downloads resume
+PUT  /api/devices/:id/fs/upload?path=&offset=   raw body; offset resumes a partial upload
+POST /api/devices/:id/fs/mkdir | /move | /delete
+```
+
+Deletes never imply recursion: a directory with anything in it is refused with a count of what is
+inside, and only a `recursive` delete removes it. SFTP v3 reports "not empty" as a bare `Failure`,
+which tells nobody anything, so the service looks before it refuses.
+
+There is no path confinement, deliberately. The point is the whole machine, and the console's auth
+gates are already the boundary for something strictly more powerful: this module injects input into
+the desktop.
+
+Verified against the same throwaway sshd and from the browser: a 100 KB round trip byte-identical
+by SHA-256, a ranged request returning exactly the asked-for bytes, an interrupted upload resumed
+from an offset and matching the original, a 404 for a missing file, a 403 for a directory that is
+not readable, and a 409 naming the device for a machine with no `ssh` block.
 
 ## Typing from a phone
 

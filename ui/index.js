@@ -14,6 +14,9 @@
 
      shell     a terminal over SSH. See ./shell.js.
 
+     files     that machine's filesystem over SFTP, on the same
+               connection. See ./files.js.
+
    The two views share one device list, one presence stream and
    one set of credentials on the gateway, which is why "ssh
    instead of rdp" is a view here and not a module of its own.
@@ -31,11 +34,12 @@ let view = 'screen';
 
 let sessionMod = null;    // lazily imported ./session.js
 let shellMod = null;      // lazily imported ./shell.js
+let filesMod = null;      // lazily imported ./files.js
 let stopSession = null;   // teardown of whichever one is running
 let inSession = false;
 
 /** Which devices belong in the current view. */
-const forView = (list) => (view === 'shell'
+const forView = (list) => (view === 'shell' || view === 'files'
   ? list.filter((d) => d.hasShell)
   : list.filter((d) => d.transport !== 'ssh'));
 
@@ -49,12 +53,17 @@ const forView = (list) => (view === 'shell'
  */
 function ensureIcons() {
   const sprite = document.getElementById('sprite');
-  if (!sprite || document.getElementById('i-terminal')) return;
-  const sym = document.createElementNS('http://www.w3.org/2000/svg', 'symbol');
-  sym.id = 'i-terminal';
-  sym.setAttribute('viewBox', '0 0 24 24');
-  sym.innerHTML = '<rect x="3" y="4" width="18" height="16"/><path d="M7 9l3 3-3 3M13 15h4"/>';
-  sprite.appendChild(sym);
+  if (!sprite) return;
+  const add = (id, paths) => {
+    if (document.getElementById(id)) return;
+    const sym = document.createElementNS('http://www.w3.org/2000/svg', 'symbol');
+    sym.id = id;
+    sym.setAttribute('viewBox', '0 0 24 24');
+    sym.innerHTML = paths;
+    sprite.appendChild(sym);
+  };
+  add('i-terminal', '<rect x="3" y="4" width="18" height="16"/><path d="M7 9l3 3-3 3M13 15h4"/>');
+  add('i-folder', '<path d="M3 6h6l2 2.5h10V19H3z"/>');
 }
 
 /* ── chooser ──────────────────────────────────────────────────────────── */
@@ -62,24 +71,31 @@ function ensureIcons() {
 function chooser() {
   const shown = forView(devices);
   const shell = view === 'shell';
+  const files = view === 'files';
   const cards = shown.map((d, i) => {
-    const on = d.online === true;
-    const why = d.online === false ? (d.error ? `offline · ${d.error}` : 'offline')
-      : d.online === null ? 'checking…'
-      : `online · ${d.latencyMs}ms`;
+    // Shell and Files need sshd; Screen needs the agent or RDP. A device can
+    // be up for one and down for the other, so each view asks about its own.
+    const useShell = shell || files;
+    const up = useShell ? d.shellOnline : d.online;
+    const err = useShell ? d.shellError : d.error;
+    const ms = useShell ? d.shellLatencyMs : d.latencyMs;
+    const on = up === true;
+    const why = up === false ? (err ? `offline · ${err}` : 'offline')
+      : up === null ? 'checking…'
+      : `online · ${ms}ms`;
     return `
       <button class="rd-tile${on ? '' : ' rd-tile--off'}" data-pick="${ctx.esc(d.id)}"
               style="--i:${i}" ${on ? '' : 'aria-disabled="true"'}>
-        <span class="rd-tile-ic">${ctx.icon(shell ? 'i-log' : d.transport === 'agent' ? 'i-monitor' : 'i-server', 'ic ic--xl')}</span>
+        <span class="rd-tile-ic">${ctx.icon(files ? 'i-folder' : shell ? 'i-terminal' : d.transport === 'agent' ? 'i-monitor' : 'i-server', 'ic ic--xl')}</span>
         <span class="rd-tile-name">${ctx.esc(d.name)}</span>
-        <span class="rd-tile-why"><span class="dot ${on ? 'dot--ok' : d.online === null ? 'dot--warn' : ''}"></span>${ctx.esc(why)}</span>
-        <span class="rd-tile-meta">${ctx.esc(shell ? 'ssh' : d.transport)}${!shell && d.hasFallback ? ' · rdp' : ''}</span>
+        <span class="rd-tile-why"><span class="dot ${on ? 'dot--ok' : up === null ? 'dot--warn' : ''}"></span>${ctx.esc(why)}</span>
+        <span class="rd-tile-meta">${ctx.esc(files ? 'sftp' : shell ? 'ssh' : d.transport)}${!shell && !files && d.hasFallback ? ' · rdp' : ''}</span>
       </button>`;
   }).join('');
 
-  const empty = shell
+  const empty = (shell || files)
     ? `<div class="empty">${ctx.icon('i-warn', 'ic ic--xl')}
-        <b>No machine has a shell</b><span>Add an <code>ssh</code> block to a device in devices.json on the gateway.</span></div>`
+        <b>No machine has a shell</b><span>Add an <code>ssh</code> block to a device in devices.json on the gateway — ${files ? 'files come over SFTP on that connection' : 'the terminal runs on it'}.</span></div>`
     : `<div class="empty">${ctx.icon('i-warn', 'ic ic--xl')}
         <b>No devices configured</b><span>Add one to devices.json on the gateway.</span></div>`;
 
@@ -87,9 +103,11 @@ function chooser() {
   <section class="rd-choose">
     <header class="rd-choose-head">
       <h2 class="h2">Devices</h2>
-      <p class="meta">${shell
-        ? 'Pick a machine to open a terminal on. Offline ones say why.'
-        : 'Pick a machine to take over. Offline ones say why.'}</p>
+      <p class="meta">${files
+        ? 'Pick a machine to browse its files. Offline ones say why.'
+        : shell
+          ? 'Pick a machine to open a terminal on. Offline ones say why.'
+          : 'Pick a machine to take over. Offline ones say why.'}</p>
     </header>
     <div class="rd-tiles">${cards || empty}</div>
   </section>`;
@@ -106,12 +124,16 @@ function showChooser() {
   root.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', () => {
     const d = devices.find((x) => x.id === b.dataset.pick);
     if (!d) return;
-    if (d.online === false) {
+    const needsShell = view === 'shell' || view === 'files';
+    const up = needsShell ? d.shellOnline : d.online;
+    if (up === false) {
       ctx.toast('warn', `${d.name} is offline`,
-        d.error || 'Nothing is answering on that machine.');
+        (needsShell ? d.shellError : d.error)
+        || (needsShell ? 'sshd is not answering on that machine.' : 'Nothing is answering on that machine.'));
       return;
     }
     if (view === 'shell') enterShell(d);
+    else if (view === 'files') enterFiles(d);
     else enterSession(d.id);
   }));
 }
@@ -147,6 +169,25 @@ async function enterShell(device) {
     document.head.appendChild(link);
   }
   stopSession = shellMod.startShell({
+    host: root,
+    ctx,
+    deviceId: device.id,
+    deviceName: device.name,
+    onExit: showChooser,
+  });
+}
+
+async function enterFiles(device) {
+  inSession = true;
+  if (!filesMod) filesMod = await import(`${ctx.base}/ui/files.js`);
+  if (!document.getElementById('fs-css')) {
+    const link = document.createElement('link');
+    link.id = 'fs-css';
+    link.rel = 'stylesheet';
+    link.href = `${ctx.base}/ui/files.css`;
+    document.head.appendChild(link);
+  }
+  stopSession = filesMod.startFiles({
     host: root,
     ctx,
     deviceId: device.id,
@@ -194,7 +235,7 @@ export default {
    */
   async setView(next) {
     if (next === view) return;
-    view = next === 'shell' ? 'shell' : 'screen';
+    view = ['shell', 'files'].includes(next) ? next : 'screen';
     showChooser();
   },
 
@@ -203,6 +244,7 @@ export default {
     stopSession = null;
     sessionMod = null;
     shellMod = null;
+    filesMod = null;
     inSession = false;
     devices = [];
     root = null;

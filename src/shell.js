@@ -99,6 +99,33 @@ export function connectOptions(device) {
   return opts;
 }
 
+/**
+ * The host-key check, shared by the shell and the file service so a device is
+ * verified the same way whichever one dials it.
+ *
+ * A pinned `ssh.fingerprint` is enforced. Without one the key is accepted and
+ * logged, so the first connection tells you what to pin — refusing outright
+ * would mean nobody can connect until they have run ssh by hand on the
+ * gateway.
+ */
+export function hostVerifierFor(device, log = console) {
+  const pinned = device.ssh?.fingerprint || '';
+  let announced = false;
+  return (key) => {
+    const fp = keyFingerprint(key);
+    if (pinned) {
+      const ok = fp === pinned;
+      if (!ok) log.warn?.(`[ssh] ${device.id}: host key ${fp} does not match pinned ${pinned}`);
+      return ok;
+    }
+    if (!announced) {
+      announced = true;
+      log.log?.(`[ssh] ${device.id}: host key ${fp} (pin it as ssh.fingerprint in devices.json)`);
+    }
+    return true;
+  };
+}
+
 export function createShellBridge({ devices, log = console } = {}) {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -143,12 +170,6 @@ export function createShellBridge({ devices, log = console } = {}) {
     say('connecting', `${opts.username}@${opts.host}:${opts.port}`);
 
     conn = new SSHClient();
-
-    // Host keys. A pinned fingerprint in devices.json is checked; without one
-    // the key is accepted and logged, so the first connection tells you what
-    // to pin. Refusing outright would mean nobody can connect until they have
-    // run ssh by hand on the gateway.
-    const pinned = device.ssh.fingerprint || '';
 
     conn.on('ready', () => {
       conn.shell({ term: 'xterm-256color', cols, rows }, (err, ch) => {
@@ -202,19 +223,7 @@ export function createShellBridge({ devices, log = console } = {}) {
     client.on('close', () => shutdown(1000, 'client_closed'));
     client.on('error', () => shutdown(1011, 'client_error'));
 
-    conn.connect({
-      ...opts,
-      hostVerifier: (key) => {
-        const fp = keyFingerprint(key);
-        if (pinned) {
-          const ok = fp === pinned;
-          if (!ok) log.warn?.(`[shell] ${device.id}: host key ${fp} does not match pinned ${pinned}`);
-          return ok;
-        }
-        log.log?.(`[shell] ${device.id}: host key ${fp} (pin it as ssh.fingerprint in devices.json)`);
-        return true;
-      },
-    });
+    conn.connect({ ...opts, hostVerifier: hostVerifierFor(device, log) });
   });
 
   return {
