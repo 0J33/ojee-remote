@@ -246,6 +246,29 @@ fitted terminal, live resize through `setWindow`, `^C` interrupting a `sleep`, a
 failure paths — unknown device (404 on the upgrade), unreadable `keyFile`, and a mismatched pinned
 fingerprint — each arriving as a sentence in the terminal rather than a silent close.
 
+## Clipboard
+
+Two buttons in the session HUD, **Send** and **Get**, rather than a background sync. That is not
+timidity: a browser will only read or write the clipboard on a user gesture, and a silent sync
+would also hand whatever you copied to whoever is sitting at the other machine.
+
+- **Agent devices:** the browser asks (`clip-get`) and the agent answers; sending is `clip-set`.
+  `agent/clipboard.py` shells out to `wl-copy` / `wl-paste` on Wayland and `xclip` on X11 —
+  no pure-Python path exists for Wayland, where the protocol requires a client with a surface.
+  Deliberately request/response, not `wl-paste --watch`: a watcher means a loop to break (the value
+  you just set comes back as a change) and a stream of the other person's clipboard while they work.
+  Text only, capped at 256 KB.
+- **RDP devices:** Guacamole has carried the clipboard both ways since forever; this end simply
+  never wired it. `gc.onclipboard` in, `createClipboardStream` out. RDP pushes on change rather than
+  on request, so **Get** hands over whatever last arrived, and says so when nothing has.
+
+When the browser refuses to write to the clipboard — no permission, an unfocused document, Safari —
+the text is shown in a prompt instead of vanishing.
+
+Verified end to end on the agent path, through the gateway and from a browser: text typed here
+landed on the machine's clipboard, and the machine's clipboard came back. The RDP path is wired but
+unverified — the Windows box was off.
+
 ## Files
 
 The **Files** view lists that machine's filesystem over SFTP, opening where ssh drops you rather

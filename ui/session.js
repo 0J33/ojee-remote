@@ -361,11 +361,17 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         }
       },
       onError: (detail) => ctx.toast?.('err', 'Remote', detail),
+      onClipboard: (text, detail) => {
+        if (detail) { ctx.toast?.('err', 'Clipboard', detail); return; }
+        if (typeof text === 'string') receiveClipboard(text);
+      },
     });
 
     screenEl.innerHTML = '';
     screenEl.appendChild(adapter.el);
     screenEl.appendChild(cursorEl);
+    // The adapter already exposes readClipboard/writeClipboard; `client` IS
+    // the adapter, so re-pointing them at it made each call itself.
     client = adapter;
     drawCursor();
   }
@@ -375,6 +381,29 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // cursor layer; here the session draws one where the pointer was last SENT
   // (already clamped onto a real screen), so it never lags the video and a
   // trackpad user can always see what a tap will hit.
+  // The last clipboard RDP pushed at us. The agent answers on request, so it
+  // has no equivalent.
+  let lastRemoteClip = null;
+
+  /**
+   * The remote machine's clipboard arrived. Try to put it on this device's
+   * clipboard, and when the browser refuses — no permission, the document
+   * isn't focused, Safari — show it so the text is not simply lost.
+   */
+  async function receiveClipboard(text) {
+    if (!text) {
+      ctx.toast?.('info', 'Clipboard', 'That machine\'s clipboard is empty.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      ctx.toast?.('ok', 'Clipboard copied',
+        `${text.length} character${text.length === 1 ? '' : 's'} from ${activeDevice?.name || 'the machine'}.`);
+    } catch {
+      window.prompt('Copy this from the remote machine', text);
+    }
+  }
+
   const cursorEl = document.createElement('div');
   cursorEl.className = 'rd-cursor';
   cursorEl.setAttribute('aria-hidden', 'true');
@@ -444,6 +473,31 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         for (const [ks, down] of seq) gc.sendKeyEvent(down, ks);
       },
       disconnect: () => { try { gc.disconnect(); } catch {} },
+      // Guacamole has carried the clipboard both ways since forever; this end
+      // simply never asked for it. Outbound is a stream, inbound is an event.
+      writeClipboard: (text) => {
+        const stream = gc.createClipboardStream('text/plain');
+        new Guacamole.StringWriter(stream).sendText(String(text ?? ''));
+        stream.sendEnd();
+      },
+      // RDP pushes the remote clipboard when it changes rather than on
+      // request, so "Get" hands over whatever arrived last.
+      readClipboard: () => {
+        if (lastRemoteClip == null) {
+          ctx.toast?.('info', 'Clipboard',
+            'Nothing has been copied on that machine since this session started.');
+          return;
+        }
+        receiveClipboard(lastRemoteClip);
+      },
+    };
+
+    gc.onclipboard = (stream, mimetype) => {
+      if (!/^text\//.test(mimetype || '')) return;   // images are a bigger design
+      const reader = new Guacamole.StringReader(stream);
+      let text = '';
+      reader.ontext = (t) => { text += t; };
+      reader.onend = () => { lastRemoteClip = text; };
     };
 
     // Single death path, fired at most once per connection generation. The
@@ -1441,6 +1495,31 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // remote machine and returns to the device list, which is what you actually
   // want when you are done with one machine — signing out of the whole console
   // was never the right pairing.
+  // ── clipboard ─────────────────────────────────────────────────────────
+  // Both directions are explicit. `navigator.clipboard` needs a user gesture
+  // and a focused document, so each is a button press, and each says what
+  // happened — a clipboard that silently does nothing is worse than none.
+  const clipSend = root.querySelector('#rd-clip-send');
+  const clipGet = root.querySelector('#rd-clip-get');
+
+  clipSend.onclick = async () => {
+    if (!client?.writeClipboard) return;
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      // Firefox has no readText for pages at all, and Safari refuses without
+      // its own paste gesture. Asking is better than failing silently.
+      text = window.prompt('Paste what you want to send to the remote machine') || '';
+      if (!text) return;
+    }
+    if (!text) { ctx.toast?.('info', 'Clipboard', 'Your clipboard is empty.'); return; }
+    client.writeClipboard(text);
+    ctx.toast?.('ok', 'Clipboard sent', `${text.length} character${text.length === 1 ? '' : 's'} to ${activeDevice?.name || 'the machine'}.`);
+  };
+
+  clipGet.onclick = () => client?.readClipboard?.();
+
   root.querySelector('#rd-exit').onclick = () => onExit?.();
   root.querySelector('#rd-hide').onclick = () => {
     hudTop.classList.add('hidden');

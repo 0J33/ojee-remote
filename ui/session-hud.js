@@ -14,6 +14,8 @@
      ⌃⌥⌦            Ctrl+Alt+Del is unreachable any other way
      the key row    Esc, Tab, arrows, Home/End, PgUp/PgDn, F1–F12
      ⌨              raises the OS keyboard for typing text
+     Clip Send/Get  the clipboard both ways; a browser only allows it
+                    from a click, so it is a button rather than a sync
 
    Ids are prefixed rd- so the session can be scoped to its own
    root and mounted inside the console shell rather than owning
@@ -54,6 +56,18 @@ export function hudMarkup() {
           <div class="rs-chips">
             <button data-fit="contain" class="rs-chip on">Fit</button>
             <button data-fit="100" class="rs-chip">1:1</button>
+          </div>
+        </div>
+
+        <!-- Clipboard is two buttons, not a silent sync: a browser will only
+             read or write the clipboard on a user gesture, and a background
+             sync would also hand this machine's clipboard to whoever is
+             sitting at the other one. -->
+        <div class="rs-group" id="rd-clip-group">
+          <span class="rs-label">Clip</span>
+          <div class="rs-chips">
+            <button id="rd-clip-send" class="rs-chip" title="Send this device's clipboard to the remote machine">Send</button>
+            <button id="rd-clip-get" class="rs-chip" title="Copy the remote machine's clipboard to this device">Get</button>
           </div>
         </div>
       </div>

@@ -56,6 +56,7 @@ import websockets  # noqa: E402
 from websockets.server import serve  # noqa: E402
 
 import capture  # noqa: E402
+import clipboard  # noqa: E402
 import display  # noqa: E402
 import inject  # noqa: E402
 import lock  # noqa: E402
@@ -654,6 +655,28 @@ class Client:
         elif t == "keyframe":
             if agent.stream:
                 agent.stream.force_keyframe()
+
+        # Clipboard, both directions, on request. Never a watcher: pushing
+        # every local copy would mean a loop to break and somebody else's
+        # clipboard arriving while they work at the machine.
+        elif t == "clip-get":
+            try:
+                text = await clipboard.read_text()
+            except clipboard.ClipboardError as e:
+                await self.ws.send(json.dumps({"t": "clip-error", "detail": str(e)}))
+                return
+            await self.ws.send(json.dumps({"t": "clip", "text": text}))
+
+        elif t == "clip-set":
+            text = msg.get("text")
+            if not isinstance(text, str):
+                return
+            try:
+                await clipboard.write_text(text)
+            except clipboard.ClipboardError as e:
+                await self.ws.send(json.dumps({"t": "clip-error", "detail": str(e)}))
+                return
+            await self.ws.send(json.dumps({"t": "clip-ok", "bytes": len(text.encode("utf-8"))}))
 
         elif t == "pong":
             sent = msg.get("ts")

@@ -446,8 +446,10 @@ const SHIFT = 42;
  * @param {Function} o.onClose      (reason) — the socket is gone
  * @param {Function} o.onFailure    (detail) — this browser cannot decode; try another path
  * @param {Function} o.onError      (detail) — the agent reported a problem
+ * @param {Function} o.onClipboard  (text|null, detail) — the machine's clipboard
+ *                                  came back, or could not be read
  */
-export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, onError }) {
+export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, onError, onClipboard }) {
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
@@ -517,6 +519,10 @@ export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, 
       if (msg.t === 'ping') return send({ t: 'pong', ts: msg.ts });
       if (msg.t === 'ready' || msg.t === 'active' || msg.t === 'layout') return applyLayout(msg);
       if (msg.t === 'error') return onError?.(msg.detail || 'agent error');
+      // Clipboard, asked for rather than streamed — see agent/clipboard.py.
+      if (msg.t === 'clip') return onClipboard?.(String(msg.text ?? ''), null);
+      if (msg.t === 'clip-error') return onClipboard?.(null, msg.detail || 'clipboard failed');
+      if (msg.t === 'clip-ok') return onClipboard?.(undefined, null);
       return;
     }
     if (failed) return;
@@ -623,6 +629,10 @@ export function connectAgent({ url, mode, onLayout, onOpen, onClose, onFailure, 
 
     select(monitor) { send({ t: 'select', monitor }); },
     keyframe() { send({ t: 'keyframe' }); },
+    /** Ask the machine for its clipboard; the answer arrives via onClipboard. */
+    readClipboard() { send({ t: 'clip-get' }); },
+    /** Put text on the machine's clipboard. */
+    writeClipboard(text) { send({ t: 'clip-set', text: String(text ?? '') }); },
 
     disconnect() {
       closed = true;
