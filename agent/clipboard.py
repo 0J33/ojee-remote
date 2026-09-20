@@ -53,19 +53,35 @@ def _tool(name: str) -> str:
 def _read_sync() -> str:
     if _wayland():
         cmd = [_tool("wl-paste"), "--no-newline", "--type", "text/plain"]
+        types = [_tool("wl-paste"), "--list-types"]
     else:
         cmd = [_tool("xclip"), "-selection", "clipboard", "-o"]
+        types = [_tool("xclip"), "-selection", "clipboard", "-o", "-t", "TARGETS"]
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired as e:
         raise ClipboardError("the clipboard did not answer in 5s") from e
-    if out.returncode != 0:
-        err = (out.stderr or b"").decode("utf-8", "replace").strip()
-        # An empty clipboard is not an error; wl-paste says so on stderr.
-        if "empty" in err.lower() or not err:
-            return ""
-        raise ClipboardError(err)
-    return out.stdout.decode("utf-8", "replace")
+    if out.returncode == 0:
+        return out.stdout.decode("utf-8", "replace")
+
+    # Failing here usually just means the clipboard is empty, and each tool
+    # says so in its own words — "No selection" (wl-clipboard 2.x), "Nothing is
+    # copied" (1.x), "target STRING not available" (xclip). Matching those
+    # sentences is how an empty clipboard started reporting itself as broken
+    # after a version bump, so ask what the clipboard HOLDS instead.
+    try:
+        listed = subprocess.run(types, capture_output=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        listed = None
+    if listed is not None and not listed.stdout.strip():
+        return ""
+    if listed is not None and listed.returncode == 0:
+        # Something is on the clipboard, just not as text — an image, a file
+        # list. Saying that is more use than repeating the tool's complaint.
+        kinds = listed.stdout.decode("utf-8", "replace").split()
+        raise ClipboardError(f"the clipboard holds {kinds[0] if kinds else 'something'}, not text")
+    err = (out.stderr or b"").decode("utf-8", "replace").strip()
+    raise ClipboardError(err or "the clipboard could not be read")
 
 
 def _write_sync(text: str) -> None:
