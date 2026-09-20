@@ -1359,8 +1359,8 @@ body.app .nav    { position: sticky; top: calc(var(--hud-h) + env(safe-area-inse
    an aria-label or visible text. Disabled on touch layouts below.
    ============================================================ */
 [data-tip] { position: relative; }
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after {
+[data-tip]:hover::before,
+[data-tip]:focus-visible::before {
   content: attr(data-tip);
   position: absolute;
   bottom: calc(100% + 8px);
@@ -1374,6 +1374,7 @@ body.app .nav    { position: sticky; top: calc(var(--hud-h) + env(safe-area-inse
   background: var(--bg-0);
   color: var(--accent);
   border: 1px solid var(--accent);
+  pointer-events: none;
   z-index: 10;
 }
 
@@ -1626,7 +1627,7 @@ body.app .nav    { position: sticky; top: calc(var(--hud-h) + env(safe-area-inse
   .toast { max-width: none; min-width: 0; }
 
   /* tooltips are hover-only — disable on touch layouts */
-  [data-tip]:hover::after { display: none; }
+  [data-tip]:hover::before { display: none; }
 }
 
 /* Segmented controls stack their glyph labels tighter on narrow phones. */
