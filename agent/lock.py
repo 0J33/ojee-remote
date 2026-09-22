@@ -4,9 +4,10 @@ Remoting into a locked machine is the normal case, not an edge case — the
 laptop locks itself while you are away, which is precisely when you want to
 reach it. The old behaviour handled that badly in both directions:
 
-  * through the agent, a locked GNOME session still captures, so you got a
-    picture of the lock screen and a keyboard you could type the password
-    into. Workable, if you happen to know that is what you are looking at.
+  * through the agent, GNOME refuses to capture at all while locked (the
+    shell inhibits screencasts on its lock screen), so there is no picture —
+    not even of the lock screen. service.py tells the viewer "locked" and
+    starts the picture the moment the lock lifts.
 
   * through RDP, gnome-remote-desktop on a locked session frequently refuses
     the connection outright. guacd reports upstream failure, the client
