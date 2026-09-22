@@ -170,6 +170,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   function connectionOk() {
     attempts = 0;
     lastReason = '';
+    if (pictureTimer) { clearTimeout(pictureTimer); pictureTimer = null; }
     hideBlocker();
   }
 
@@ -196,19 +197,27 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     }
   }
 
+  /* Said the moment it is known. The agent reports it on connect, and
+     again if the screen locks while you watch; RDP cannot say, so for RDP it
+     is what giveUp() finds out after the retries run dry. */
+  function showLocked() {
+    setStatus(`${activeDevice.name} is locked`, 'err');
+    showBlocker({
+      title: `${activeDevice.name} is locked`,
+      detail: 'Its screen is locked, and a locked screen cannot be shared. '
+            + 'Unlocking does not need the password — reaching this page already proved who you are.',
+      actions: [
+        { label: 'Unlock and connect', primary: true, run: unlockAndConnect },
+        { label: 'Try again', run: retryNow },
+      ],
+    });
+  }
+
   async function giveUp() {
     setStatus(lastReason || 'cannot connect', 'err');
     const lock = await lockState();
     if (lock?.locked) {
-      showBlocker({
-        title: `${activeDevice.name} is locked`,
-        detail: 'Its screen is locked, which is why the session will not open. '
-              + 'Unlocking does not need the password — reaching this page already proved who you are.',
-        actions: [
-          { label: 'Unlock and connect', primary: true, run: unlockAndConnect },
-          { label: 'Try again', run: retryNow },
-        ],
-      });
+      showLocked();
       return;
     }
     showBlocker({
@@ -224,9 +233,15 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
 
   function retryNow() {
     attempts = 0;
+    if (pictureTimer) { clearTimeout(pictureTimer); pictureTimer = null; }
     hideBlocker();
     connect();
   }
+
+  // After an unlock, how long to wait for the agent's picture on the socket
+  // that is already open before dialling a fresh one instead.
+  const PICTURE_WAIT_MS = 8000;
+  let pictureTimer = null;
 
   async function unlockAndConnect() {
     setStatus('unlocking…');
@@ -235,6 +250,20 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         { method: 'POST' });
       if (r && r.ok === false) throw new Error(r.error || 'the screen stayed locked');
       ctx.toast?.('ok', 'Unlocked', `${activeDevice.name} is unlocked.`);
+      // An agent session is still connected and starts the picture by itself
+      // once the lock lifts; dialling again would only race it. If nothing
+      // arrives, dial after all. RDP has no such channel and reconnects.
+      if (client?.kind === 'agent' && client.isOpen?.()) {
+        hideBlocker();
+        setStatus('unlocked · starting the picture…');
+        if (pictureTimer) clearTimeout(pictureTimer);
+        pictureTimer = setTimeout(() => {
+          pictureTimer = null;
+          client?.disconnect();
+          retryNow();
+        }, PICTURE_WAIT_MS);
+        return;
+      }
       retryNow();
     } catch (e) {
       ctx.toast?.('err', 'Could not unlock', e.message);
@@ -361,6 +390,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         }
       },
       onError: (detail) => ctx.toast?.('err', 'Remote', detail),
+      onLocked: () => {
+        if (myGen !== rdpGeneration) return;
+        showLocked();
+      },
       onClipboard: (text, detail) => {
         if (detail) { ctx.toast?.('err', 'Clipboard', detail); return; }
         if (typeof text === 'string') receiveClipboard(text);

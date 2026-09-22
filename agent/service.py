@@ -127,6 +127,9 @@ MAX_QUEUED_UNITS = 3
 # composited into one frame, laid out as mutter arranges them.
 DESKTOP = "desktop"
 LAYOUT_POLL_S = 3.0
+# How often to look at the lock while a viewer is waiting on a locked screen.
+# Only then: nobody waiting means nothing to start.
+UNLOCK_POLL_S = 1.0
 
 # Where frames come from. "mutter" records every monitor by connector with no
 # dialog, so plugging and unplugging never asks anything; "portal" is the
@@ -164,6 +167,9 @@ class Agent:
         # Set when a pipeline reports a stale node id; the next start re-opens
         # the grant instead of reusing a session we know is dead.
         self.session_stale = False
+        # Capture is refused because the screen is locked; viewers have been
+        # told, and the picture starts again the moment it unlocks.
+        self.locked = False
 
     # ── setup ──────────────────────────────────────────────────────────
     def _open_capture(self):
@@ -466,6 +472,63 @@ class Agent:
         gy = (m["y"] + fy * m["h"] - dy) / dh
         self.input.move_fraction(gx, gy)
 
+    # ── the lock screen ────────────────────────────────────────────────
+    def screen_locked(self) -> bool:
+        """Is this machine's screen locked right now?
+
+        GNOME stops every screencast while its lock screen is up. The shell
+        drops into its unlock-dialog mode, which inhibits remote access: mutter
+        closes the session that was recording and answers every new
+        CreateSession with "Session creation inhibited". Nothing that retries
+        gets past that, and the failures it produces further down ("target not
+        found", then "no usable H.264 encoder") name the wrong thing entirely.
+        So a capture failure is checked against the lock before it is treated
+        as a fault."""
+        try:
+            return lock.state().get("locked") is True
+        except Exception:                                  # noqa: BLE001
+            return False
+
+    def hold_for_unlock(self):
+        """Capture cannot run until the screen is unlocked: say so to every
+        viewer, keep them connected, and start the picture when the lock lifts
+        — whoever lifts it, from here or at the machine."""
+        with self._lock:
+            if self.stream:
+                self.stream.stop()
+                self.stream = None
+            self.session_stale = True
+            already = self.locked
+            self.locked = True
+        self.broadcast({"t": "locked", "name": NAME})
+        if already:
+            return
+        print("[capture] the screen is locked - holding viewers until it unlocks", flush=True)
+        threading.Thread(target=self._wait_for_unlock, daemon=True).start()
+
+    def _wait_for_unlock(self):
+        while self.clients and self.screen_locked():
+            time.sleep(UNLOCK_POLL_S)
+        unlocked = bool(self.clients)
+        self.locked = False
+        if unlocked:
+            print("[capture] the screen is unlocked - starting the picture", flush=True)
+            self._rebuild("screen unlocked")
+
+    def start_view(self):
+        """What a newly connected viewer sees first: the whole desktop, or the
+        default monitor if the desktop cannot be composed."""
+        try:
+            return self.select(DESKTOP)
+        except Exception as e:                             # noqa: BLE001
+            if self.screen_locked():
+                raise
+            print(f"[client] desktop view failed, falling back: {e}", flush=True)
+            default = self.default_monitor()
+            if not default:
+                raise
+            return self.select(default)
+
     # ── hotplug ────────────────────────────────────────────────────────
     def broadcast(self, msg: dict):
         """Send a control message to every client, from any thread."""
@@ -517,7 +580,9 @@ class Agent:
                             self.stream = None
                         self.reacquire_portal()
                         self.session_stale = False
-                    if active and self.clients:
+                    # A viewer held on the lock screen has no view yet; it
+                    # gets the one every new connection starts on.
+                    if self.clients:
                         info = self.select(active if (active == DESKTOP or self.monitor(active)) else DESKTOP)
                         self.broadcast({"t": "active", **info})
                         if self.stream:
@@ -527,6 +592,12 @@ class Agent:
                         self.broadcast({"t": "layout", **self.layout()})
                     return
                 except Exception as e:                     # noqa: BLE001
+                    # Locked is not a failure to retry: nothing will work until
+                    # it is unlocked, and five attempts end in an error that
+                    # blames capture for doing what GNOME told it to.
+                    if self.screen_locked():
+                        self.hold_for_unlock()
+                        return
                     print(f"[capture] rebuild after {why} failed (attempt {attempt + 1}): {e}",
                           flush=True)
                     time.sleep(2 + 2 * attempt)
@@ -748,37 +819,43 @@ async def ws_handler(ws, agent: Agent):
     client = Client(ws, agent)
     agent.clients.add(client)
     try:
-        if not agent.active:
-            view = DESKTOP if any(x.get("capturable") for x in agent.monitors) else None
-            if view:
-                try:
-                    await asyncio.get_running_loop().run_in_executor(None, agent.select, view)
-                except Exception as e:                     # noqa: BLE001
-                    print(f"[client] desktop view failed, falling back: {e}", flush=True)
-                    default = agent.default_monitor()
-                    if default:
-                        await asyncio.get_running_loop().run_in_executor(None, agent.select, default)
+        if agent.locked:
+            # Already waiting on the lock for someone else; this viewer waits too.
+            await ws.send(json.dumps({"t": "locked", "name": NAME}))
+        elif not (agent.active and agent.stream):
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, agent.start_view)
+            except Exception:                              # noqa: BLE001
+                if not await loop.run_in_executor(None, agent.screen_locked):
+                    raise
+                # Tells this viewer as well: it is already in agent.clients.
+                await loop.run_in_executor(None, agent.hold_for_unlock)
 
-        m = agent.monitor(agent.active) if agent.active and agent.active != DESKTOP else None
-        st = agent.stream
-        await ws.send(json.dumps({
-            "t": "ready",
-            "name": NAME,
-            "codec": "avc1.42E01E",       # baseline 3.0 — decodes everywhere
-            "format": "annexb",
-            "active": agent.active,
-            "monitor": agent.active,
-            "w": (st.out_w if agent.active == DESKTOP and st else (m["w"] if m else 0)),
-            "h": (st.out_h if agent.active == DESKTOP and st else (m["h"] if m else 0)),
-            "encoder": st.encoder_name if st else None,
-            **agent.layout(),
-        }))
+        # No "ready" while locked: there is no picture to describe. The
+        # connection stays open, and when the screen unlocks the stream starts
+        # on it with an "active".
+        if not agent.locked:
+            m = agent.monitor(agent.active) if agent.active and agent.active != DESKTOP else None
+            st = agent.stream
+            await ws.send(json.dumps({
+                "t": "ready",
+                "name": NAME,
+                "codec": "avc1.42E01E",       # baseline 3.0 — decodes everywhere
+                "format": "annexb",
+                "active": agent.active,
+                "monitor": agent.active,
+                "w": (st.out_w if agent.active == DESKTOP and st else (m["w"] if m else 0)),
+                "h": (st.out_h if agent.active == DESKTOP and st else (m["h"] if m else 0)),
+                "encoder": st.encoder_name if st else None,
+                **agent.layout(),
+            }))
 
-        # A newly-attached client cannot decode until an IDR arrives, and the
-        # next scheduled one may be two seconds away — which reads as a frozen
-        # black rectangle on every connect.
-        if agent.stream:
-            agent.stream.force_keyframe()
+            # A newly-attached client cannot decode until an IDR arrives, and the
+            # next scheduled one may be two seconds away — which reads as a frozen
+            # black rectangle on every connect.
+            if agent.stream:
+                agent.stream.force_keyframe()
 
         # Not gather(). gather() does NOT cancel its siblings when one task
         # raises, so on every disconnect the sender (blocked on the queue), the
@@ -799,9 +876,12 @@ async def ws_handler(ws, agent: Agent):
         # Stop encoding when nobody is watching. This is the difference between
         # a service that idles at zero and one that pins a GPU forever because
         # a phone locked its screen three hours ago.
-        if not agent.clients and agent.stream:
-            agent.stream.stop()
-            agent.stream = None
+        if not agent.clients:
+            if agent.stream:
+                agent.stream.stop()
+                agent.stream = None
+            # Even with no stream (held on the lock screen): a view left set
+            # would make the next viewer skip starting one.
             agent.active = None
 
 
