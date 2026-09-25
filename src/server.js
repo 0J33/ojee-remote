@@ -168,6 +168,19 @@ app.get('/api/summary', (_req, res) => {
         : 'nothing to connect to right now',
     facts,
     alerts: [],
+    // The console draws this module as a screen being mirrored: one index
+    // mark per configured device with the reachable ones lit, and a scan that
+    // runs at the speed of the fastest link — stopped dead when there is
+    // nothing to connect to.
+    model: {
+      streaming: online.length > 0,
+      devices: list.length,
+      online: online.length,
+      latencyMs: online
+        .map((d) => d.latencyMs)
+        .filter((v) => Number.isFinite(v))
+        .sort((a, b) => a - b)[0] ?? null,
+    },
   });
 });
 
