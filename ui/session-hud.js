@@ -10,6 +10,7 @@
    mouse and keyboard can:
 
      L / M / R      a phone has no right mouse button
+     Scroll ↑ ↓     wheel notches at the cursor; hold to keep scrolling
      Ctrl Alt ⇧ ⌘   you cannot hold a modifier and tap a letter
      ⌃⌥⌦            Ctrl+Alt+Del is unreachable any other way
      the key row    Esc, Tab, arrows, Home/End, PgUp/PgDn, F1–F12
@@ -105,6 +106,13 @@ export function hudMarkup() {
             <button class="rs-chip rs-mod" data-mod="Meta">Super</button>
             <button class="rs-chip rs-chip--warn" id="rd-ctrlaltdel"
                     title="Send Ctrl+Alt+Del">C-A-Del</button>
+          </div>
+        </div>
+        <div class="rs-cell" aria-label="Scroll">
+          <span class="rs-cell-label">Scroll</span>
+          <div class="rs-cell-body">
+            <button class="rs-chip" id="rd-scroll-up" title="Scroll up at the cursor (hold to repeat)" aria-label="Scroll up">↑</button>
+            <button class="rs-chip" id="rd-scroll-down" title="Scroll down at the cursor (hold to repeat)" aria-label="Scroll down">↓</button>
           </div>
         </div>
         <div class="rs-cell" aria-label="Mouse clicks">

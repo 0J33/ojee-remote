@@ -1462,6 +1462,22 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   });
 
   // ── click chips ───────────────────────────────────────────────────────
+  // Scroll chips: one wheel notch at the cursor per press, and held they keep
+  // going — a page is many notches long and nobody wants to tap forty times.
+  for (const [id, bit] of [['#rd-scroll-up', 0x08], ['#rd-scroll-down', 0x10]]) {
+    const chip = root.querySelector(id);
+    let delay = 0, rep = 0;
+    const stop = () => { clearTimeout(delay); clearInterval(rep); delay = rep = 0; };
+    chip.addEventListener('pointerdown', (e) => {
+      if (!client) return;
+      e.preventDefault();
+      stop();
+      clickButton(bit);
+      delay = setTimeout(() => { rep = setInterval(() => { if (client) clickButton(bit); else stop(); }, 70); }, 350);
+    });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) chip.addEventListener(ev, stop);
+    chip.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
   root.querySelector('#rd-click-left').onclick = () => sendModWrappedClick(BTN_LEFT);
   root.querySelector('#rd-click-middle').onclick = () => sendModWrappedClick(BTN_MIDDLE);
   root.querySelector('#rd-click-right').onclick = () => sendModWrappedClick(BTN_RIGHT);
