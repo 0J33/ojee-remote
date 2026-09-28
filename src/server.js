@@ -88,15 +88,12 @@ const MANIFEST = {
   id: 'remote',
   name: 'Remote',
   version: pkg.version,
+  // One view. Screen, Shell and Files used to be three, each the same device
+  // list with a different verb; now every device card carries all three, so
+  // a machine's screen and shell state are on screen together and nothing
+  // takes a tab, then a card, then the thing you wanted.
   views: [
-    { id: 'screen', label: 'Screen', icon: 'i-monitor' },
-    // A terminal is the same device list with a different verb, so it is a
-    // view here rather than a module of its own — one devices.json, one
-    // presence poll, one set of credentials.
-    { id: 'shell', label: 'Shell', icon: 'i-terminal' },
-    // Files ride the shell's SSH connection over SFTP: same dial, same
-    // credential, nothing extra installed on the far end.
-    { id: 'files', label: 'Files', icon: 'i-folder' },
+    { id: 'devices', label: 'Devices', icon: 'i-monitor' },
   ],
   ui: '/ui/index.js',
   health: '/api/health',
@@ -432,6 +429,26 @@ function fileDevice(req, res) {
   return d;
 }
 
+/** Types a browser can show in a tab. Anything else downloads. HTML and SVG
+ *  are deliberately plain text: they would run as the console's origin. */
+const INLINE_TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
+  mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', opus: 'audio/ogg',
+  flac: 'audio/flac', wav: 'audio/wav',
+  pdf: 'application/pdf',
+};
+const TEXT_EXT = new Set(['txt', 'md', 'log', 'csv', 'json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'cfg',
+  'js', 'mjs', 'ts', 'py', 'sh', 'c', 'h', 'cpp', 'rs', 'go', 'java', 'rb', 'php', 'css', 'html', 'htm',
+  'svg', 'xml', 'sql', 'env', 'service']);
+function mimeOf(name) {
+  const ext = String(name).split('.').pop().toLowerCase();
+  if (INLINE_TYPES[ext]) return INLINE_TYPES[ext];
+  if (TEXT_EXT.has(ext) || !String(name).includes('.')) return 'text/plain; charset=utf-8';
+  return 'application/octet-stream';
+}
+
 /** One place to turn an SFTP failure into an HTTP one. */
 function fileFail(res, e) {
   const { http, code, detail } = sftpError(e);
@@ -451,7 +468,57 @@ app.get('/api/devices/:id/fs/stat', async (req, res) => {
 
 app.post('/api/devices/:id/fs/mkdir', async (req, res) => {
   const d = fileDevice(req, res); if (!d) return;
-  try { res.json(await files.mkdir(d, req.body?.path)); } catch (e) { fileFail(res, e); }
+  try { res.json(await files.mkdir(d, req.body?.path, { parents: !!req.body?.parents })); } catch (e) { fileFail(res, e); }
+});
+
+app.post('/api/devices/:id/fs/copy', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  const { from, to } = req.body || {};
+  if (!from || !to) return res.status(400).json({ error: 'from_and_to_required' });
+  try { res.json(await files.copy(d, from, to)); } catch (e) { fileFail(res, e); }
+});
+
+/**
+ * A folder, or several entries of one folder, as one .tar download. Headers
+ * wait for the first byte: tar that fails at once (a name that vanished, a
+ * folder that is not readable) should answer with its reason as JSON, not
+ * with an empty file that looks like a successful download.
+ */
+app.get('/api/devices/:id/fs/archive', async (req, res) => {
+  const d = fileDevice(req, res); if (!d) return;
+  const dir = req.query.dir;
+  const names = [].concat(req.query.name || []);
+  if (!dir || !names.length) return res.status(400).json({ error: 'dir_and_name_required' });
+  const base = names.length === 1 ? names[0] : (String(dir).split('/').filter(Boolean).pop() || 'files');
+  const fname = `${base}.tar`;
+  let ch;
+  try { ch = await files.archive(d, dir, names); } catch (e) { return fileFail(res, e); }
+  let stderr = '';
+  let started = false;
+  ch.stderr.on('data', (b) => { if (stderr.length < 4096) stderr += b; });
+  ch.on('data', (b) => {
+    if (!started) {
+      started = true;
+      res.status(200).set({
+        'content-type': 'application/x-tar',
+        'content-disposition': `attachment; filename="${fname.replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(fname)}`,
+        'cache-control': 'no-store',
+      });
+    }
+    if (!res.write(b)) { ch.pause(); res.once('drain', () => ch.resume()); }
+  });
+  ch.on('exit', (code) => { ch.exitCode = code; });
+  ch.on('close', () => {
+    if (!started) {
+      return res.status(ch.exitCode === 0 ? 200 : 409)
+        .json({ error: 'archive_failed', detail: stderr.trim() || `tar exited ${ch.exitCode}` });
+    }
+    // GNU tar exits 1 for "file changed as we read it" — the archive is still
+    // whole. Anything worse truncates the stream, which the browser reports.
+    if (ch.exitCode > 1) { files.log.warn?.(`[files] archive ${dir}: ${stderr.trim()}`); res.destroy(); return; }
+    res.end();
+  });
+  res.on('close', () => { if (!res.writableFinished) { try { ch.close(); } catch { /* gone */ } } });
 });
 
 app.post('/api/devices/:id/fs/move', async (req, res) => {
@@ -490,12 +557,19 @@ app.get('/api/devices/:id/fs/download', async (req, res) => {
       range ? { start, end } : {});
 
     res.status(range ? 206 : 200);
+    // ?inline=1 is "open in a tab": the browser renders what it can (images,
+    // video, PDFs, text) instead of saving it. Everything else stays an
+    // attachment of unknown type, which is what makes a download a download.
+    const inline = req.query.inline === '1';
     res.set({
-      'content-type': 'application/octet-stream',
+      'content-type': inline ? mimeOf(name) : 'application/octet-stream',
+      // nosniff keeps a file that is really HTML rendering as the text it was
+      // labelled, rather than running as a page on the console's origin.
+      ...(inline ? { 'x-content-type-options': 'nosniff' } : {}),
       'content-length': String(range ? end - start + 1 : size),
       'accept-ranges': 'bytes',
       // filename* carries non-ASCII names; filename is the fallback.
-      'content-disposition': `attachment; filename="${name.replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${name.replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
       ...(range ? { 'content-range': `bytes ${start}-${end}/${size}` } : {}),
     });
     stream.on('error', (e) => { files.log.warn?.(`[files] download ${name}: ${e.message}`); res.destroy(); });

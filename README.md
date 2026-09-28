@@ -271,17 +271,28 @@ unverified — the Windows box was off.
 
 ## Files
 
-The **Files** view lists that machine's filesystem over SFTP, opening where ssh drops you rather
-than at `/`. Navigate, upload (button or drag and drop), download, rename, make folders, delete.
-Transfers are a queue with progress rather than fire-and-forget, and uploads stream through the
-gateway, so a 4 GB video never sits in memory on either end.
+The module opens on one **Devices** view: a card per machine, each carrying **Screen**, **Shell**
+and **Files** with their own reachability (the screen and sshd are probed separately). There are
+no per-verb tabs any more — the card is the machine and the buttons are what you can do to it.
+
+**Files** lists that machine's filesystem over SFTP, opening where ssh drops you rather than at
+`/`. One interaction model on every screen: a click or tap on a folder opens it; a tap on a file
+toggles it, a mouse click selects it (ctrl/shift extend), double-click opens it in a tab; the
+checkbox always toggles; `⋮` (or right-click) is every action for one row. A selection raises an
+action bar — Download, Move, Copy, Rename, Delete. Move and Copy are cut-and-paste: pick, walk to
+the destination, Paste. Upload files or a whole folder (button, or drag and drop onto the list),
+with per-file progress, speed, cancel (which removes the partial file) and retry; name clashes ask
+Replace / Skip first. Downloads go to the browser's own download manager; a folder or a
+multi-selection comes down as one `.tar`. Uploads stream through the gateway, so a 4 GB video
+never sits in memory on either end.
 
 ```
 GET  /api/devices/:id/fs?path=           one directory, dirs first
 GET  /api/devices/:id/fs/stat?path=      one entry
-GET  /api/devices/:id/fs/download?path=  Range supported, so downloads resume
+GET  /api/devices/:id/fs/download?path=[&inline=1]   Range supported; inline opens in a tab
+GET  /api/devices/:id/fs/archive?dir=&name=…         entries of one folder as a .tar (tar on the device)
 PUT  /api/devices/:id/fs/upload?path=&offset=   raw body; offset resumes a partial upload
-POST /api/devices/:id/fs/mkdir | /move | /delete
+POST /api/devices/:id/fs/mkdir {path, parents?} | /move | /copy (cp -a on the device) | /delete
 ```
 
 Deletes never imply recursion: a directory with anything in it is refused with a count of what is

@@ -61,6 +61,11 @@ export function cleanPath(p, { base = '/' } = {}) {
   return `/${out.join('/')}`;
 }
 
+/** One POSIX-shell word: single-quoted, with embedded quotes spliced. */
+export function shq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 /** What the browser is told about one directory entry. */
 export function entryOf(name, attrs, longname = '') {
   const mode = attrs?.mode ?? 0;
@@ -103,7 +108,7 @@ export function createFileService({ devices, log = console } = {}) {
     if (held) {
       clearTimeout(held.timer);
       held.users += 1;
-      resolve(held.sftp);
+      resolve(held);
       return;
     }
 
@@ -121,7 +126,7 @@ export function createFileService({ devices, log = console } = {}) {
         // A dropped connection must not leave a dead handle in the pool for
         // the next request to use.
         conn.on('close', () => { if (pool.get(device.id) === entry) pool.delete(device.id); });
-        resolve(sftp);
+        resolve(entry);
       });
     });
     conn.on('error', fail);
@@ -136,12 +141,45 @@ export function createFileService({ devices, log = console } = {}) {
       e.http = 409;
       throw e;
     }
-    const sftp = await acquire(device);
+    const { sftp } = await acquire(device);
     try {
       return await fn(sftp);
     } finally {
       release(device.id);
     }
+  }
+
+  /**
+   * Run one command on the device over the pooled connection and hand back
+   * the exec channel. SFTP v3 has no copy and no archive, and both are one
+   * coreutils call away on the far end — so they ride the same connection
+   * rather than being rebuilt as a byte shuttle through the gateway.
+   */
+  async function execOn(device, cmd) {
+    if (!device?.ssh) { const e = new Error('no ssh block'); e.http = 409; throw e; }
+    const { conn } = await acquire(device);
+    return new Promise((resolve, reject) => {
+      conn.exec(cmd, (err, channel) => {
+        if (err) { release(device.id); reject(err); return; }
+        let released = false;
+        const done = () => { if (!released) { released = true; release(device.id); } };
+        channel.once('close', done);
+        channel.once('error', done);
+        resolve(channel);
+      });
+    });
+  }
+
+  /** Run a command to completion: `{ code, stdout, stderr }`, output capped. */
+  async function execAll(device, cmd) {
+    const ch = await execOn(device, cmd);
+    return new Promise((resolve) => {
+      let stdout = ''; let stderr = ''; let code = null;
+      ch.on('data', (b) => { if (stdout.length < 65536) stdout += b; });
+      ch.stderr.on('data', (b) => { if (stderr.length < 65536) stderr += b; });
+      ch.on('exit', (c) => { code = c; });
+      ch.on('close', () => resolve({ code, stdout, stderr: stderr.trim() }));
+    });
   }
 
   const promisify = (sftp, method, ...args) => new Promise((resolve, reject) => {
@@ -175,12 +213,80 @@ export function createFileService({ devices, log = console } = {}) {
       });
     },
 
-    async mkdir(device, path) {
+    /** `parents` is mkdir -p: every missing level is made, and an existing
+     *  directory is success — what a folder upload needs before its files. */
+    async mkdir(device, path, { parents = false } = {}) {
       return withSftp(device, async (sftp) => {
         const p = cleanPath(path);
-        await promisify(sftp, 'mkdir', p);
+        if (!parents) {
+          await promisify(sftp, 'mkdir', p);
+          return { path: p };
+        }
+        let acc = '';
+        for (const part of p.split('/').filter(Boolean)) {
+          acc += `/${part}`;
+          try {
+            const st = await promisify(sftp, 'stat', acc);
+            if ((st.mode & 0o170000) !== 0o040000) {
+              const e = new Error(`${acc} exists and is not a folder`);
+              e.http = 409; e.code = 6;
+              throw e;
+            }
+          } catch (e) {
+            if (e.code !== 2) throw e;          // anything but "no such file"
+            await promisify(sftp, 'mkdir', acc);
+          }
+        }
         return { path: p };
       });
+    },
+
+    /**
+     * Copy one entry, recursively for a folder. `cp -a` on the device: SFTP
+     * has no copy, and shuttling every byte down to the gateway and back up
+     * again would turn a local disk copy into two network transfers.
+     */
+    async copy(device, from, to) {
+      const a = cleanPath(from); const b = cleanPath(to);
+      if (b === a || b.startsWith(`${a}/`)) {
+        const e = new Error('cannot copy a folder into itself');
+        e.http = 409; throw e;
+      }
+      // Refuse rather than merge or overwrite: the UI picks a free name, and
+      // cp's own no-clobber flag changed exit status between coreutils 9.x
+      // releases, so it cannot be trusted to say whether it did anything.
+      const taken = await withSftp(device, (sftp) => promisify(sftp, 'lstat', b).then(() => true, () => false));
+      if (taken) { const e = new Error(`${b} already exists`); e.http = 409; e.code = 11; throw e; }
+      const { code, stderr } = await execAll(device, `cp -a -- ${shq(a)} ${shq(b)}`);
+      if (code !== 0) {
+        const e = new Error(stderr || `cp exited ${code}`);
+        e.http = 409; throw e;
+      }
+      return { from: a, to: b };
+    },
+
+    /**
+     * Several entries of one folder as a tar stream, for downloading a folder
+     * or a multi-selection in one go. Uncompressed on purpose: most of what
+     * is worth pulling off a machine (video, photos, archives) is already
+     * compressed, and gzip would only make the far end's CPU the bottleneck.
+     */
+    async archive(device, dir, names) {
+      const d = cleanPath(dir);
+      const list = (Array.isArray(names) ? names : [names]).map(String);
+      if (!list.length) { const e = new Error('nothing to archive'); e.http = 400; throw e; }
+      for (const n of list) {
+        if (!n || n === '.' || n === '..' || n.includes('/') || n.includes('\0')) {
+          const e = new Error(`not a name in that folder: ${n}`); e.http = 400; throw e;
+        }
+      }
+      // Look before packing: tar that cannot find a name still writes an
+      // end-of-archive block before it exits, so its failure would arrive as
+      // a small, valid, empty .tar rather than as an error.
+      await withSftp(device, async (sftp) => {
+        for (const n of list) await promisify(sftp, 'lstat', `${d.replace(/\/+$/, '')}/${n}`);
+      });
+      return execOn(device, `tar -cf - -C ${shq(d)} -- ${list.map(shq).join(' ')}`);
     },
 
     async move(device, from, to) {
@@ -233,7 +339,7 @@ export function createFileService({ devices, log = console } = {}) {
      */
     async read(device, path, { start, end } = {}) {
       if (!device?.ssh) { const e = new Error('no ssh block'); e.http = 409; throw e; }
-      const sftp = await acquire(device);
+      const { sftp } = await acquire(device);
       try {
         const p = cleanPath(path);
         const attrs = await promisify(sftp, 'stat', p);
@@ -254,7 +360,7 @@ export function createFileService({ devices, log = console } = {}) {
      */
     async write(device, path, { offset = 0 } = {}) {
       if (!device?.ssh) { const e = new Error('no ssh block'); e.http = 409; throw e; }
-      const sftp = await acquire(device);
+      const { sftp } = await acquire(device);
       try {
         const p = cleanPath(path);
         const stream = sftp.createWriteStream(p, offset > 0 ? { flags: 'r+', start: offset } : { flags: 'w' });

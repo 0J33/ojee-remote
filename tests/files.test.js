@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { cleanPath, entryOf, sftpError } from '../src/files.js';
+import { cleanPath, entryOf, sftpError, shq, createFileService } from '../src/files.js';
 
 test('paths normalise to one absolute form', () => {
   assert.equal(cleanPath('/home//ojee///notes.txt'), '/home/ojee/notes.txt');
@@ -81,4 +81,27 @@ test('an unknown failure is a 500 that still says what happened', () => {
   assert.equal(e.http, 500);
   assert.equal(e.code, 'sftp_error');
   assert.equal(e.detail, 'socket hang up');
+});
+
+test('shell words survive quotes, spaces and metacharacters', () => {
+  // copy and archive run cp/tar on the device, so a filename is a shell word.
+  assert.equal(shq('plain'), "'plain'");
+  assert.equal(shq("it's here"), "'it'\\''s here'");
+  assert.equal(shq('$(rm -rf ~); `x`'), "'$(rm -rf ~); `x`'");
+});
+
+test('an archive refuses names that would leave the folder', async () => {
+  const files = createFileService({ devices: null, log: { warn() {} } });
+  const dev = { id: 'x', ssh: { host: 'nowhere' } };
+  for (const bad of ['../etc', 'a/b', '..', '.', '']) {
+    await assert.rejects(files.archive(dev, '/home', [bad]), (e) => e.http === 400, bad);
+  }
+  await assert.rejects(files.archive(dev, '/home', []), (e) => e.http === 400);
+});
+
+test('a folder cannot be copied into itself', async () => {
+  const files = createFileService({ devices: null, log: { warn() {} } });
+  const dev = { id: 'x', ssh: { host: 'nowhere' } };
+  await assert.rejects(files.copy(dev, '/a/b', '/a/b/c'), (e) => e.http === 409);
+  await assert.rejects(files.copy(dev, '/a/b', '/a/b'), (e) => e.http === 409);
 });

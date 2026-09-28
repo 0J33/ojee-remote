@@ -1,17 +1,18 @@
 /* ============================================================
    ojee-remote — the Files view.
 
-   The shapes are storage.ojee.net's file browser, which already
-   solved this on the same design system: a path as breadcrumbs
-   rather than a title, a sticky sortable column header, 44px rows
-   on a fixed grid with a checkbox column, and a transfer strip
-   underneath. Same tokens, same proportions — a folder on a remote
-   machine should not look like a different product from a folder
-   on the NAS.
+   The shapes are storage.ojee.net's file browser, on the same
+   design system: a path as breadcrumbs rather than a title, a
+   sticky sortable column header, fixed-grid rows with a checkbox
+   column, and a transfer strip underneath.
+
+   On a phone the table becomes a list: one line of name, one of
+   size and date under it, a 44px checkbox on the left and a 44px
+   ⋮ on the right — a thumb, not a cursor.
 
    Controls are the module's own `.rs-chip` / `.rs-icon` and the
-   system's `.input`, `.label`, `.bar` and `.empty`. This file is
-   layout and the list itself; nothing here restyles a shared class.
+   system's `.input` and `.empty`. Every selector here is a class
+   this view invented (fs-); nothing restyles a shared class.
    ============================================================ */
 
 .fs {
@@ -24,55 +25,85 @@
      scrollbar to the page. */
   height: calc(100dvh - 200px);
   max-height: calc(100dvh - 200px);
-  min-height: 0;
+  min-height: 360px;
 }
 
-/* ---------- path + tools ---------- */
-.fs-bar {
+/* ---------- where you are ---------- */
+.fs-top > .rs-icon { flex: none; }
+.fs-top {
   flex: none;
-  display: flex; align-items: center; gap: var(--s-3);
-  flex-wrap: wrap;
+  display: flex; align-items: center; gap: 12px;
   padding: 10px 12px;
   background: var(--panel);
   border: 1px solid var(--line-2);
+  min-width: 0;
 }
-
+.fs-where { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.fs-dev {
+  font-family: var(--hud); font-size: 0.56rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--accent);
+}
 .fs-crumbs {
-  display: flex; align-items: baseline; gap: 5px;
-  flex: 1 1 320px; min-width: 0; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 2px;
+  min-width: 0;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
 }
+.fs-crumbs::-webkit-scrollbar { display: none; }
 .fs-crumb {
-  background: none; border: 0; cursor: pointer; padding: 2px 0;
-  font-family: var(--mono); font-size: 0.8rem;
+  flex: none;
+  background: none; border: 0; cursor: pointer;
+  padding: 3px 4px; min-height: 28px;
+  font-family: var(--mono); font-size: 0.82rem;
   color: var(--dim);
   transition: var(--t);
 }
-.fs-crumb:hover { color: var(--accent); }
-.fs-crumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fs-crumb:hover { color: var(--accent); background: var(--accent-03); }
+.fs-crumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 /* Where you are is the one crumb you are not going to click. */
-.fs-crumb:last-of-type { color: var(--ink); font-weight: 700; }
-.fs-crumb-sep { color: var(--line-strong); }
-.fs-crumb-count { margin-left: var(--s-2); }
+.fs-crumb.is-here { color: var(--ink); font-weight: 700; }
+.fs-crumb-sep { flex: none; color: var(--line-strong); font-family: var(--mono); font-size: 0.8rem; }
 
-.fs-tools { display: flex; align-items: center; gap: var(--s-2); flex: 0 0 auto; }
-
-.fs-search { position: relative; display: inline-flex; align-items: center; color: var(--dim); }
-.fs-search > svg { position: absolute; left: 9px; width: 15px; height: 15px; pointer-events: none; }
-.fs-search-input { padding-left: 30px; width: 150px; height: 34px; min-height: 34px; }
-.fs-search-input::-webkit-search-cancel-button { filter: grayscale(1); }
-
-/* ---------- the selection strip ---------- */
-.fs-selbar {
+/* ---------- tools ---------- */
+.fs-tools {
   flex: none;
   display: flex; align-items: center; gap: var(--s-2);
-  padding: 6px 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+}
+.fs-nav, .fs-make { display: flex; align-items: center; gap: 2px; flex: none; }
+.fs-make { margin-left: auto; }
+.fs-tools .rs-icon[disabled] { opacity: 0.35; cursor: not-allowed; }
+.fs-tools .rs-icon .ic { width: 18px; height: 18px; }
+
+.fs-chip { display: inline-flex; align-items: center; gap: 7px; }
+.fs-chip .ic { width: 16px; height: 16px; flex: none; }
+/* Sorting is the column header on a desktop; a phone has no header. */
+.fs-sortbtn { display: none; }
+
+.fs-search { position: relative; display: inline-flex; align-items: center; color: var(--dim); flex: 0 1 220px; min-width: 0; }
+.fs-search > svg { position: absolute; left: 9px; width: 15px; height: 15px; pointer-events: none; }
+.fs-search-input { padding-left: 30px; height: 34px; min-height: 34px; }
+.fs-search-input::-webkit-search-cancel-button { filter: grayscale(1); }
+
+/* ---------- move / copy in progress ---------- */
+.fs-clipbar {
+  flex: none;
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 6px 8px 6px 12px;
   background: var(--accent-08);
   border: 1px solid var(--accent);
+  font-size: 0.72rem;
 }
-.fs-selcount { margin-right: auto; letter-spacing: 2px; color: var(--accent); }
+.fs-clip-txt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.fs-clip-txt b { color: var(--accent); }
+.fs-clip-from { color: var(--dim); font-family: var(--mono); font-size: 0.64rem; }
 
 /* ---------- the list ---------- */
 .fs-listwrap {
+  position: relative;
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column;
   background: var(--bg-0);
@@ -83,56 +114,53 @@
    the reason this is a grid and not a table is the sticky header. */
 .fs-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 150px 90px 130px;
+  grid-template-columns: 40px minmax(0, 1fr) 160px 90px 84px;
   align-items: center;
-  /* --s-3, not --s-2: Size is right-aligned and Kind is left-aligned, so a
-     narrow gutter ran "SIZE" straight into "KIND" and read as one column. */
   gap: var(--s-3);
-  padding-inline: 12px;
+  padding-inline: 4px 8px;
 }
 
 .fs-listhead {
   flex: none;
-  height: 32px;
+  height: 34px;
   border-bottom: 1px solid var(--line);
   font-family: var(--hud); font-size: 0.58rem;
   letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--dim);
 }
 .fs-sort {
-  background: none; border: 0; cursor: pointer; text-align: left; padding: 4px 0;
+  background: none; border: 0; cursor: pointer; text-align: left; padding: 6px 0;
   font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit;
   transition: var(--t);
 }
-.fs-sort:nth-of-type(3) { text-align: right; }
+.fs-sort--r { text-align: right; }
 .fs-sort:hover { color: var(--ink-2); }
 .fs-sort.is-on { color: var(--accent); }
 /* The arrow is drawn, not typed, so the header keeps its exact width when the
    direction flips. */
 .fs-sort.is-on::after { content: ' ▲'; font-size: 0.85em; }
 .fs-sort.is-on[data-dir="desc"]::after { content: ' ▼'; }
+.fs-count { text-align: right; font-family: var(--mono); letter-spacing: 0; text-transform: none; font-size: 0.62rem; }
 
-.fs-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; outline: none; }
-.fs-list .fs-row {
-  height: 44px;
-  cursor: default; user-select: none;
+.fs-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; outline: none; overscroll-behavior: contain; }
+.fs-list.is-busy { opacity: 0.6; transition: opacity var(--dur-2) 120ms; }
+.fs-item {
+  height: 46px;
+  cursor: pointer; user-select: none; -webkit-user-select: none;
   border-bottom: 1px solid var(--line-2);
   color: var(--ink-2);
   transition: background var(--dur-2), color var(--dur-2);
+  -webkit-tap-highlight-color: transparent;
 }
-.fs-list .fs-row:hover { background: var(--tint-1); color: var(--ink); }
-.fs-list .fs-row.is-sel { background: var(--accent-08); color: var(--ink); }
+.fs-item:hover { background: var(--tint-1); color: var(--ink); }
+.fs-item.is-sel { background: var(--accent-08); color: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
+/* Picked for a move: still listed until it lands, visibly on its way out. */
+.fs-item.is-cut { opacity: 0.5; }
 
-/* The parent row: same height and grid as the rest, so nothing shifts when
-   you reach the top of a drive. */
-.fs-row--up { cursor: pointer; }
-.fs-row--up.is-top { cursor: default; color: var(--dim); }
-.fs-row--up.is-top:hover { background: none; color: var(--dim); }
-
-.fs-check { display: inline-flex; align-items: center; justify-content: center; height: 100%; }
+.fs-check { display: inline-flex; align-items: center; justify-content: center; align-self: stretch; cursor: pointer; }
 .fs-check input {
   appearance: none; -webkit-appearance: none;
-  width: 15px; height: 15px; margin: 0;
+  width: 16px; height: 16px; margin: 0;
   border: 1px solid var(--line-strong);
   background: var(--panel);
   cursor: pointer; position: relative;
@@ -148,69 +176,244 @@
 }
 .fs-check input:indeterminate { border-color: var(--accent); }
 .fs-check input:indeterminate::after {
-  content: ''; position: absolute; left: 2px; top: 6px; width: 9px; height: 2px;
+  content: ''; position: absolute; left: 3px; top: 6px; width: 8px; height: 2px;
   background: var(--accent);
 }
 .fs-check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.fs-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.fs-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.fs-name-col { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
 .fs-ic { display: inline-flex; flex: none; color: var(--dim); }
-.fs-ic .ic { width: 16px; height: 16px; }
-.fs-row[data-type="dir"] .fs-ic { color: var(--accent); }
-.fs-row[data-type="dir"] .fs-name-text { font-weight: 700; }
-.fs-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.78rem; }
+.fs-ic .ic { width: 18px; height: 18px; }
+.fs-item[data-type="dir"] .fs-ic { color: var(--accent); }
+.fs-item[data-type="dir"] .fs-name-text { font-weight: 700; color: var(--ink); }
+.fs-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem; }
+.fs-link { color: var(--dim); font-size: 0.72rem; }
+/* Size and date under the name — the phone's columns. */
+.fs-sub { display: none; font-family: var(--mono); font-size: 0.62rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.fs-when, .fs-size, .fs-kind {
-  font-family: var(--mono); font-size: 0.66rem;
+.fs-when, .fs-size {
+  font-family: var(--mono); font-size: 0.68rem;
   color: var(--dim); white-space: nowrap;
 }
 .fs-size { text-align: right; }
-.fs-kind { overflow: hidden; text-overflow: ellipsis; }
+
+.fs-racts { display: flex; justify-content: flex-end; gap: 2px; }
+.fs-ra {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; flex: none;
+  background: none; border: 1px solid transparent;
+  color: var(--dim); cursor: pointer;
+  transition: var(--t);
+  touch-action: manipulation;
+}
+.fs-ra .ic { width: 18px; height: 18px; }
+.fs-ra:hover { color: var(--accent); border-color: var(--line-strong); background: var(--panel); }
+.fs-ra:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The quick download shows itself where the pointer is; ⋮ is always there. */
+.fs-ra--dl { opacity: 0; }
+.fs-item:hover .fs-ra--dl, .fs-item.is-sel .fs-ra--dl, .fs-ra--dl:focus-visible { opacity: 1; }
+
+.fs-empty { margin: auto; padding: 48px 16px; }
+.fs-empty .rs-chip { margin-top: 8px; }
 
 /* ---------- drop target ---------- */
 .fs-drop {
   position: absolute; inset: 0; z-index: 5;
   display: grid; place-items: center;
   background: color-mix(in srgb, var(--bg-0) 82%, transparent);
-  border: 1px dashed var(--accent);
+  border: 2px dashed var(--accent);
   pointer-events: none;
   color: var(--accent);
-  font-family: var(--mono); font-size: 0.7rem; font-weight: 900;
+  font-family: var(--mono); font-size: 0.72rem; font-weight: 900;
   letter-spacing: 2px; text-transform: uppercase;
 }
+.fs-drop > span { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+/* ---------- selection actions ---------- */
+.fs-selbar {
+  flex: none;
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  box-shadow: 0 -6px 18px color-mix(in srgb, var(--bg-0) 60%, transparent);
+}
+.fs-selcount {
+  font-family: var(--mono); font-size: 0.7rem; font-weight: 900;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+  white-space: nowrap;
+}
+.fs-selacts { display: flex; gap: 2px; margin-left: auto; }
+.fs-sa {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 38px; padding: 0 12px;
+  background: var(--chrome-2);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em;
+  cursor: pointer; transition: var(--t);
+  touch-action: manipulation;
+}
+.fs-sa .ic { width: 17px; height: 17px; flex: none; }
+.fs-sa:hover { border-color: var(--accent); color: var(--ink); background: var(--accent-03); }
+.fs-sa:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fs-sa[disabled] { opacity: 0.35; cursor: not-allowed; }
+.fs-sa[disabled]:hover { border-color: var(--line-strong); background: var(--chrome-2); color: var(--ink-2); }
+.fs-sa--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--line-strong)); }
+.fs-sa--warn:hover { background: var(--warn); color: var(--on-accent); border-color: var(--warn); }
 
 /* ---------- transfers ---------- */
 .fs-transfers {
   flex: none;
-  max-height: 34%;
+  max-height: 36%;
   display: flex; flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--line-2);
 }
-.fs-tr-head { display: flex; align-items: center; gap: var(--s-3); padding: 7px 12px; flex: none; }
-.fs-tr-sum { margin-right: auto; font-family: var(--mono); font-size: 0.66rem; color: var(--dim); }
-.fs-tr-list { overflow-y: auto; padding: 0 12px 8px; }
+.fs-tr-head { display: flex; align-items: center; gap: var(--s-2); padding: 4px 8px 4px 4px; flex: none; }
+.fs-tr-toggle {
+  display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto;
+  min-height: 36px; padding: 0 8px;
+  background: none; border: 0; cursor: pointer; color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.66rem;
+}
+.fs-tr-toggle .ic { width: 18px; height: 18px; flex: none; transition: transform var(--dur-2); }
+.fs-transfers.is-closed .fs-tr-toggle .ic { transform: rotate(-90deg); }
+.fs-tr-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fs-tr-title { font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); }
+.fs-tr-sum { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs-tr-total { flex: 1 1 60px; }
+.fs-transfers.is-closed .fs-tr-list { display: none; }
+.fs-tr-list { overflow-y: auto; padding: 0 8px 6px 12px; }
 .fs-tr {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto 34px;
   align-items: center;
-  gap: var(--s-2);
-  padding: 5px 0;
+  column-gap: var(--s-2);
+  padding: 4px 0 6px;
+  border-top: 1px solid var(--line-2);
   font-size: 0.72rem;
 }
-.fs-tr-dir { color: var(--dim); }
-.fs-tr-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.fs-tr-state { font-family: var(--mono); font-size: 0.62rem; color: var(--dim); }
-.fs-tr.error .fs-tr-state { color: var(--err); }
-.fs-tr.done  .fs-tr-state { color: var(--ok); }
-.fs-tr-bar { grid-column: 1 / -1; height: 2px; }
+.fs-tr-ic { display: inline-flex; color: var(--dim); }
+.fs-tr-ic .ic { width: 16px; height: 16px; }
+.fs-tr-name { display: flex; flex-direction: column; min-width: 0; }
+.fs-tr-file { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.fs-tr-dest { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 0.6rem; color: var(--dim); }
+.fs-tr-state { font-family: var(--mono); font-size: 0.62rem; color: var(--dim); white-space: nowrap; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
+.fs-tr-btns { display: flex; justify-content: flex-end; }
+.fs-tr--error .fs-tr-state { color: var(--err); }
+.fs-tr--done .fs-tr-state { color: var(--ok); }
+.fs-tr--done .fs-tr-ic { color: var(--ok); }
+.fs-tr--cancelled { opacity: 0.6; }
+.fs-tr-bar { grid-column: 2 / -1; }
 
-@media (max-width: 720px) {
-  .fs { height: calc(100dvh - 150px); max-height: calc(100dvh - 150px); }
-  /* Kind and Modified are the first things to go: a name and a size are what
-     you are looking for on a phone. */
-  .fs-row { grid-template-columns: 34px minmax(0, 1fr) 82px; }
-  .fs-when, .fs-kind { display: none; }
-  .fs-sort[data-sort="mtime"], .fs-sort[data-sort="type"] { display: none; }
-  .fs-search-input { width: 110px; }
+/* A progress bar of this view's own: the system's .bar is a meter with a
+   scan animation, which reads as "busy" even at 100%. */
+.fs-bar { display: block; height: 3px; background: var(--line-2); overflow: hidden; }
+.fs-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
+.fs-tr--error .fs-fill, .fs-fill--err { background: var(--err); }
+.fs-tr--done .fs-fill { background: var(--ok); }
+
+/* ---------- menus ---------- */
+.fs-menu {
+  position: fixed; z-index: calc(var(--z-modal) - 1);
+  min-width: 210px;
+  display: flex; flex-direction: column;
+  padding: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--bg-0) 70%, transparent);
 }
+.fs-menu[hidden] { display: none; }
+.fs-menu-item {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 38px; padding: 0 12px;
+  background: none; border: 0; cursor: pointer; text-align: left;
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.74rem;
+}
+.fs-menu-item .ic { width: 18px; height: 18px; flex: none; color: var(--dim); }
+.fs-menu-item:hover, .fs-menu-item:focus-visible { background: var(--accent-08); color: var(--ink); outline: none; }
+.fs-menu-item:hover .ic { color: var(--accent); }
+.fs-menu-item.is-on { color: var(--accent); }
+.fs-menu-item--warn, .fs-menu-item--warn .ic { color: var(--warn); }
+.fs-menu-hint { margin-left: auto; color: var(--dim); font-size: 0.64rem; }
+.fs-menu-sep { height: 1px; margin: 4px 0; background: var(--line); }
+.fs-scrim {
+  position: fixed; inset: 0; z-index: calc(var(--z-modal) - 2);
+  background: var(--scrim);
+}
+.fs-scrim[hidden] { display: none; }
+/* On a phone the menu is a sheet from the bottom edge, in thumb reach. */
+.fs-menu--sheet {
+  left: 0; right: 0; bottom: 0; top: auto;
+  padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  border-width: 1px 0 0;
+  max-height: 80dvh; overflow-y: auto;
+}
+.fs-menu--sheet .fs-menu-item { min-height: 50px; font-size: 0.82rem; }
+
+/* ---------- dialogs (inside the console's modal) ---------- */
+.fs-ask { display: flex; flex-direction: column; gap: 8px; }
+.fs-ask-label { font-family: var(--mono); font-size: 0.66rem; color: var(--dim); word-break: break-all; }
+/* 16px: anything smaller and iOS zooms the page when the field takes focus. */
+.fs-ask-input { font-size: 16px; }
+.fs-ask-err { color: var(--err); font-size: 0.66rem; min-height: 1em; }
+.fs-ask-p { margin: 0 0 10px; font-size: 0.78rem; color: var(--ink-2); line-height: 1.5; word-break: break-word; }
+.fs-ask-warn { color: var(--warn); }
+.fs-ask-list { margin: 0; padding-left: 18px; font-family: var(--mono); font-size: 0.7rem; color: var(--ink); }
+
+/* ---------- tablet ---------- */
+@media (max-width: 1000px) {
+  .fs-make .fs-chip span { display: none; }
+  .fs-make .fs-chip[data-act="upload"] span { display: inline; }
+  .fs-row { grid-template-columns: 40px minmax(0, 1fr) 130px 80px 80px; }
+}
+
+/* ---------- phone ---------- */
+@media (max-width: 720px) {
+  .fs { height: calc(100dvh - 150px); max-height: calc(100dvh - 150px); min-height: 320px; }
+  .fs-top { padding: 8px; gap: 8px; }
+  .fs-top .rs-icon { width: 40px; height: 40px; }
+
+  .fs-tools { flex-wrap: wrap; padding: 6px 8px; row-gap: 6px; }
+  .fs-nav .rs-icon { width: 40px; height: 40px; }
+  /* Two rows: getting around (nav + filter), then making things — four
+     equal buttons, icon over label, the width of the screen. */
+  .fs-search { flex: 1 1 120px; }
+  .fs-search-input { height: 40px; min-height: 40px; font-size: 16px; }
+  .fs-make { flex: 1 1 100%; margin-left: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
+  .fs-make .fs-chip {
+    flex-direction: column; justify-content: center; gap: 3px;
+    min-height: 48px; padding: 4px; font-size: 0.56rem;
+  }
+  .fs-make .fs-chip span { display: inline; white-space: nowrap; }
+  .fs-sortbtn { display: inline-flex; }
+
+  .fs-listhead { display: none; }
+  .fs-row { grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 4px; padding-inline: 0 2px; }
+  .fs-item { height: 58px; }
+  .fs-when, .fs-size, .fs-ra--dl { display: none; }
+  .fs-sub { display: block; }
+  .fs-check input { width: 20px; height: 20px; }
+  .fs-check input:checked::after { left: 6px; top: 2px; width: 5px; height: 10px; }
+  .fs-ra { width: 44px; height: 44px; }
+  .fs-name-text { font-size: 0.86rem; }
+
+  .fs-selbar { padding: 4px; gap: 4px; }
+  .fs-selbar .rs-icon { width: 44px; height: 44px; flex: none; }
+  .fs-selacts { flex: 1 1 auto; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .fs-selword, .fs-tarword { display: none; }
+  .fs-selcount { min-width: 18px; text-align: center; font-size: 0.8rem; }
+  .fs-sa {
+    flex-direction: column; gap: 3px; justify-content: center;
+    min-height: 50px; min-width: 0; padding: 4px 2px;
+    font-size: 0.54rem;
+  }
+  .fs-sa span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  .fs-clip-from { display: none; }
+  .fs-tr-state { max-width: 18ch; }
+}
+

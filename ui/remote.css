@@ -270,47 +270,93 @@
 .rd-choose { display: flex; flex-direction: column; gap: var(--s-4); }
 .rd-choose-head { display: flex; flex-direction: column; gap: 4px; }
 
-.rd-tiles {
+/* One card per machine, its three verbs on it. Screen and Shell/Files are
+   probed separately — the host agent can be down while sshd answers — so
+   each button carries its own state rather than the card pretending there
+   is one answer. */
+.rd-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
   gap: 2px;
 }
 
-.rd-tile {
-  position: relative;
-  display: flex; flex-direction: column; gap: 9px;
-  min-height: 160px; padding: 18px;
+.rd-card {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: 16px;
   background: var(--panel);
   border: 1px solid var(--line-2);
   color: var(--ink-2);
-  cursor: pointer; text-align: left;
-  transition: border-color var(--dur), color var(--dur), transform var(--dur);
   animation: rd-tile-in 300ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: calc(var(--i, 0) * 45ms);
+  transition: border-color var(--dur);
 }
+.rd-card:hover { border-color: var(--line-hover); }
 @keyframes rd-tile-in { from { opacity: 0; transform: translateY(10px); } }
 
-.rd-tile:hover, .rd-tile:focus-visible { border-color: var(--accent); color: var(--ink); }
-.rd-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.rd-tile:active { transform: scale(0.985); }
-.rd-tile-ic { color: var(--accent); }
-.rd-tile-name {
-  margin-top: auto;
+.rd-card-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.rd-card-ic { display: inline-flex; flex: none; color: var(--accent); }
+.rd-card-title { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.rd-card-name {
   font-family: var(--mono); font-size: 0.9rem; font-weight: 900;
   letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.rd-tile-why { display: flex; align-items: center; gap: 8px; font-size: 0.64rem; color: var(--dim); }
-.rd-tile-meta {
-  position: absolute; top: 16px; right: 16px;
+.rd-card-why {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.64rem; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rd-card-meta {
+  flex: none; align-self: flex-start;
   font-family: var(--hud); font-size: 0.54rem; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--dim);
 }
-/* Offline is dimmed AND struck AND labelled in words — never colour alone.
-   Still focusable: selecting one explains the failure, which beats a dead
-   control that ignores you. */
-.rd-tile--off { opacity: 0.55; }
-.rd-tile--off .rd-tile-ic { color: var(--warn); }
-.rd-tile--off .rd-tile-name { text-decoration: line-through; }
+/* Offline is dimmed AND labelled in words — never colour alone. */
+.rd-card--off .rd-card-ic { color: var(--warn); }
+.rd-card--off .rd-card-name { color: var(--ink-2); text-decoration: line-through; }
+
+.rd-acts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; }
+
+.rd-act {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  min-height: 76px; padding: 11px 12px;
+  background: var(--chrome-2);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+  cursor: pointer; text-align: left;
+  font-family: var(--mono);
+  transition: var(--t);
+  touch-action: manipulation;
+}
+.rd-act .ic { width: 20px; height: 20px; color: var(--accent); }
+.rd-act:hover { border-color: var(--accent); color: var(--ink); background: var(--accent-03); }
+.rd-act:active { transform: scale(0.985); background: var(--accent-08); }
+.rd-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rd-act-label {
+  font-size: 0.72rem; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink);
+}
+.rd-act-state {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.6rem; color: var(--dim); white-space: nowrap;
+}
+.rd-act-dot { width: 6px; height: 6px; flex: none; background: var(--dim); }
+.rd-act--on .rd-act-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.rd-act--wait .rd-act-dot { background: var(--warn); }
+.rd-act--off .rd-act-dot { background: var(--err); }
+/* Offline stays clickable — the click says why, which beats a dead control.
+   Not available at all (no ssh block, a terminal-only box) is disabled. */
+.rd-act--off { opacity: 0.6; }
+.rd-act--off .ic { color: var(--warn); }
+.rd-act--off .rd-act-label { text-decoration: line-through; }
+.rd-act[disabled] { opacity: 0.32; cursor: not-allowed; }
+.rd-act[disabled]:hover { border-color: var(--line-strong); background: var(--chrome-2); color: var(--ink-2); }
+.rd-act[disabled] .ic { color: var(--dim); }
+
+@media (max-width: 520px) {
+  .rd-card { padding: 12px; gap: 12px; }
+  .rd-act { min-height: 64px; padding: 9px 10px; }
+}
 
 /* ---------- fullscreen ---------- */
 /* The far machine should own the screen, not sit in a 900px box under two
