@@ -10,8 +10,9 @@
    size and date under it, a 44px checkbox on the left and a 44px
    ⋮ on the right — a thumb, not a cursor.
 
-   Controls are the module's own `.rs-chip` / `.rs-icon` and the
-   system's `.input` and `.empty`. Every selector here is a class
+   Buttons are the design system's own — `.btn` (--ghost, --sm,
+   --danger) and `.iconbtn` — so they match every other screen in
+   the console; `.input` and `.empty` likewise. Every selector here is a class
    this view invented (fs-); nothing restyles a shared class.
    ============================================================ */
 
@@ -29,7 +30,6 @@
 }
 
 /* ---------- where you are ---------- */
-.fs-top > .rs-icon { flex: none; }
 .fs-top {
   flex: none;
   display: flex; align-items: center; gap: 12px;
@@ -73,13 +73,8 @@
   background: var(--panel);
   border: 1px solid var(--line-2);
 }
-.fs-nav, .fs-make { display: flex; align-items: center; gap: 2px; flex: none; }
-.fs-make { margin-left: auto; }
-.fs-tools .rs-icon[disabled] { opacity: 0.35; cursor: not-allowed; }
-.fs-tools .rs-icon .ic { width: 18px; height: 18px; }
-
-.fs-chip { display: inline-flex; align-items: center; gap: 7px; }
-.fs-chip .ic { width: 16px; height: 16px; flex: none; }
+.fs-nav, .fs-make { display: flex; align-items: center; gap: 4px; flex: none; }
+.fs-make { margin-left: auto; gap: 6px; }
 /* Sorting is the column header on a desktop; a phone has no header. */
 .fs-sortbtn { display: none; }
 
@@ -244,25 +239,7 @@
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
   white-space: nowrap;
 }
-.fs-selacts { display: flex; gap: 2px; margin-left: auto; }
-.fs-sa {
-  display: inline-flex; align-items: center; gap: 7px;
-  min-height: 38px; padding: 0 12px;
-  background: var(--chrome-2);
-  border: 1px solid var(--line-strong);
-  color: var(--ink-2);
-  font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em;
-  cursor: pointer; transition: var(--t);
-  touch-action: manipulation;
-}
-.fs-sa .ic { width: 17px; height: 17px; flex: none; }
-.fs-sa:hover { border-color: var(--accent); color: var(--ink); background: var(--accent-03); }
-.fs-sa:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.fs-sa[disabled] { opacity: 0.35; cursor: not-allowed; }
-.fs-sa[disabled]:hover { border-color: var(--line-strong); background: var(--chrome-2); color: var(--ink-2); }
-.fs-sa--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--line-strong)); }
-.fs-sa--warn:hover { background: var(--warn); color: var(--on-accent); border-color: var(--warn); }
-
+.fs-selacts { display: flex; gap: 6px; margin-left: auto; }
 /* ---------- transfers ---------- */
 .fs-transfers {
   flex: none;
@@ -289,6 +266,7 @@
 .fs-tr {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto 34px;
+  row-gap: 4px;
   align-items: center;
   column-gap: var(--s-2);
   padding: 4px 0 6px;
@@ -366,29 +344,21 @@
 
 /* ---------- tablet ---------- */
 @media (max-width: 1000px) {
-  .fs-make .fs-chip span { display: none; }
-  .fs-make .fs-chip[data-act="upload"] span { display: inline; }
+  .fs-make .fs-lbl, .fs-selacts .fs-lbl { display: none; }
   .fs-row { grid-template-columns: 40px minmax(0, 1fr) 130px 80px 80px; }
 }
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
   .fs { height: calc(100dvh - 150px); max-height: calc(100dvh - 150px); min-height: 320px; }
-  .fs-top { padding: 8px; gap: 8px; }
-  .fs-top .rs-icon { width: 40px; height: 40px; }
+  .fs-top { padding: 8px; gap: 10px; }
 
-  .fs-tools { flex-wrap: wrap; padding: 6px 8px; row-gap: 6px; }
-  .fs-nav .rs-icon { width: 40px; height: 40px; }
-  /* Two rows: getting around (nav + filter), then making things — four
-     equal buttons, icon over label, the width of the screen. */
+  /* Two rows: getting around (nav + filter), then making things. */
+  .fs-tools { flex-wrap: wrap; padding: 8px; row-gap: 8px; }
   .fs-search { flex: 1 1 120px; }
-  .fs-search-input { height: 40px; min-height: 40px; font-size: 16px; }
-  .fs-make { flex: 1 1 100%; margin-left: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
-  .fs-make .fs-chip {
-    flex-direction: column; justify-content: center; gap: 3px;
-    min-height: 48px; padding: 4px; font-size: 0.56rem;
-  }
-  .fs-make .fs-chip span { display: inline; white-space: nowrap; }
+  .fs-search-input { height: 36px; min-height: 36px; font-size: 16px; }
+  .fs-make { flex: 1 1 100%; margin-left: 0; }
+  .fs-upbtn { flex: 1 1 auto; }
   .fs-sortbtn { display: inline-flex; }
 
   .fs-listhead { display: none; }
@@ -401,17 +371,10 @@
   .fs-ra { width: 44px; height: 44px; }
   .fs-name-text { font-size: 0.86rem; }
 
-  .fs-selbar { padding: 4px; gap: 4px; }
-  .fs-selbar .rs-icon { width: 44px; height: 44px; flex: none; }
-  .fs-selacts { flex: 1 1 auto; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .fs-selword, .fs-tarword { display: none; }
+  .fs-selbar { padding: 6px; gap: 6px; }
+  .fs-selword { display: none; }
   .fs-selcount { min-width: 18px; text-align: center; font-size: 0.8rem; }
-  .fs-sa {
-    flex-direction: column; gap: 3px; justify-content: center;
-    min-height: 50px; min-width: 0; padding: 4px 2px;
-    font-size: 0.54rem;
-  }
-  .fs-sa span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .fs-selacts { gap: 2px; }
 
   .fs-clip-from { display: none; }
   .fs-tr-state { max-width: 18ch; }

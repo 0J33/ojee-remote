@@ -87,6 +87,12 @@ function ensureIcons() {
   add('i-upload', '<path d=\"M450-313v-371L330-564l-43-43 193-193 193 193-43 43-120-120v371h-60ZM220-160q-24 0-42-18t-18-42v-143h60v143h520v-143h60v143q0 24-18 42t-42 18H220Z\"/>');
   add('i-sort', '<path d=\"M323-450v-316L202-645l-42-42 193-193 193 193-42 42-121-121v316h-60ZM607-80 414-273l42-42 121 121v-316h60v316l121-121 42 42L607-80Z\"/>');
   add('i-external', '<path d=\"M180-120q-24 0-42-18t-18-42v-600q0-24 18-42t42-18h279v60H180v600h600v-279h60v279q0 24-18 42t-42 18H180Zm202-219-42-43 398-398H519v-60h321v321h-60v-218L382-339Z\"/>');
+  add('i-image', '<path d=\"M180-120q-24 0-42-18t-18-42v-600q0-24 18-42t42-18h600q24 0 42 18t18 42v600q0 24-18 42t-42 18H180Zm0-60h600v-600H180v600Zm56-97h489L578-473 446-302l-93-127-117 152Zm-56 97v-600 600Z\"/>');
+  add('i-video', '<path d=\"m140-800 74 152h130l-74-152h89l74 152h130l-74-152h89l74 152h130l-74-152h112q24 0 42 18t18 42v520q0 24-18 42t-42 18H140q-24 0-42-18t-18-42v-520q0-24 18-42t42-18Zm0 212v368h680v-368H140Zm0 0v368-368Z\"/>');
+  add('i-audio', '<path d=\"M286.5-163.5Q243-207 243-270t43.5-106.5Q330-420 393-420q28 0 50.5 8t39.5 22v-450h234v135H543v435q0 63-43.5 106.5T393-120q-63 0-106.5-43.5Z\"/>');
+  add('i-pdf', '<path d=\"M331-431h37v-83h48q15.73 0 26.36-10.64Q453-535.28 453-551v-48q0-15.72-10.64-26.36Q431.73-636 416-636h-85v205Zm37-120v-48h48v48h-48Zm129 120h84q15 0 26-10.64 11-10.63 11-26.36v-131q0-15.72-11-26.36Q596-636 581-636h-84v205Zm37-37v-131h47v131h-47Zm133 37h37v-83h50v-37h-50v-48h50v-37h-87v205ZM260-200q-24 0-42-18t-18-42v-560q0-24 18-42t42-18h560q24 0 42 18t18 42v560q0 24-18 42t-42 18H260Zm0-60h560v-560H260v560ZM140-80q-24 0-42-18t-18-42v-620h60v620h620v60H140Zm120-740v560-560Z\"/>');
+  add('i-archive', '<path d=\"M640-496v-92h92v92h-92Zm0 92h-92v-92h92v92Zm0 92v-92h92v92h-92ZM456-680l-60-60H140v520h408v-92h92v92h180v-460H640v92h-92v-92h-92ZM140-160q-24 0-42-18.5T80-220v-520q0-23 18-41.5t42-18.5h281l60 60h339q23 0 41.5 18.5T880-680v460q0 23-18.5 41.5T820-160H140Zm0-60v-520 520Z\"/>');
+  add('i-code', '<path d=\"M320-242 80-482l242-242 43 43-199 199 197 197-43 43Zm318 2-43-43 199-199-197-197 43-43 240 240-242 242Z\"/>');
   add('i-house', '<path d=\"M220-180h150v-250h220v250h150v-390L480-765 220-570v390Zm-60 60v-480l320-240 320 240v480H530v-250H430v250H160Zm320-353Z\"/>');
   add('i-more', '<path d=\"M479.86-160Q460-160 446-174.14t-14-34Q432-228 446.14-242t34-14Q500-256 514-241.86t14 34Q528-188 513.86-174t-34 14Zm0-272Q460-432 446-446.14t-14-34Q432-500 446.14-514t34-14Q500-528 514-513.86t14 34Q528-460 513.86-446t-34 14Zm0-272Q460-704 446-718.14t-14-34Q432-772 446.14-786t34-14Q500-800 514-785.86t14 34Q528-732 513.86-718t-34 14Z\"/>');
   add('i-up', '<path d=\"M450-160v-526L202-438l-42-42 320-320 320 320-42 42-248-248v526h-60Z\"/>');
@@ -135,17 +141,21 @@ function deviceCard(d, i) {
   const offErr = ACTIONS.map((a) => (a.has(d) && a.up(d) === false ? a.err(d) : null)).find(Boolean);
   const head = anyOn ? 'online' : anyWait ? 'checking…' : `offline${offErr ? ` · ${offErr}` : ''}`;
   const kind = d.transport === 'ssh' ? 'ssh' : `${d.transport}${d.hasFallback ? ' · rdp' : ''}${d.hasShell ? ' · ssh' : ''}`;
+  // The console's own buttons. Offline is .btn--disabled WITHOUT the
+  // disabled attribute: it looks unavailable, but a click still explains why.
+  // Not offered at all (no ssh block, a terminal-only box) is truly disabled.
   const btns = ACTIONS.map((a, k) => {
     const st = states[k];
     return `
-      <button class="rd-act rd-act--${st.key}" data-act="${a.id}" data-dev="${ctx.esc(d.id)}"
-              ${st.key === 'na' ? 'disabled' : ''}
-              ${st.key === 'off' ? 'aria-disabled="true"' : ''}
-              title="${ctx.esc(st.key === 'na' ? a.none : `${a.label} · ${st.key === 'off' ? (a.err(d) || 'offline') : st.text}`)}">
-        ${ctx.icon(a.icon, 'ic')}
-        <span class="rd-act-label">${a.label}</span>
-        <span class="rd-act-state"><span class="rd-act-dot" aria-hidden="true"></span>${ctx.esc(st.text)}</span>
-      </button>`;
+      <div class="rd-act">
+        <button class="btn btn--ghost btn--sm rd-act-btn${st.key === 'off' ? ' btn--disabled' : ''}"
+                data-act="${a.id}" data-dev="${ctx.esc(d.id)}"
+                ${st.key === 'na' ? 'disabled' : ''} ${st.key === 'off' ? 'aria-disabled="true"' : ''}
+                title="${ctx.esc(st.key === 'na' ? a.none : `${a.label} · ${st.key === 'off' ? (a.err(d) || 'offline') : st.text}`)}">
+          ${ctx.icon(a.icon, 'ic')}<span>${a.label}</span>
+        </button>
+        <span class="rd-act-state rd-act--${st.key}"><span class="rd-act-dot" aria-hidden="true"></span>${ctx.esc(st.text)}</span>
+      </div>`;
   }).join('');
   return `
     <article class="rd-card${anyOn ? '' : anyWait ? ' rd-card--wait' : ' rd-card--off'}" style="--i:${i}">
@@ -186,7 +196,7 @@ function showChooser() {
 
 function paintChooser() {
   root.innerHTML = chooser();
-  root.querySelectorAll('.rd-act[data-act]').forEach((b) => b.addEventListener('click', () => {
+  root.querySelectorAll('.rd-act-btn[data-act]').forEach((b) => b.addEventListener('click', () => {
     const d = devices.find((x) => x.id === b.dataset.dev);
     const a = ACTIONS.find((x) => x.id === b.dataset.act);
     if (!d || !a || !a.has(d)) return;

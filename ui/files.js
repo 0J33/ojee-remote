@@ -69,6 +69,22 @@ const previewable = (name) => {
   return dot > 0 && PREVIEW.has(name.slice(dot + 1).toLowerCase());
 };
 
+/** The glyph for a row, from its extension — SFTP says nothing of content. */
+const KIND_ICON = {};
+for (const [icon, exts] of Object.entries({
+  'i-image': 'png jpg jpeg gif webp svg bmp avif heic ico',
+  'i-video': 'mp4 mkv mov avi webm m4v wmv flv',
+  'i-audio': 'mp3 flac wav ogg m4a opus aac',
+  'i-archive': 'zip tar gz tgz bz2 xz zst 7z rar deb rpm iso',
+  'i-pdf': 'pdf',
+  'i-code': 'js mjs ts py sh c h cpp rs go java rb php css html sql json yaml yml toml',
+})) for (const e of exts.split(' ')) KIND_ICON[e] = icon;
+const iconOf = (e) => {
+  if (e.type === 'dir') return 'i-folder';
+  const dot = e.name.lastIndexOf('.');
+  return (dot > 0 && KIND_ICON[e.name.slice(dot + 1).toLowerCase()]) || 'i-file';
+};
+
 /** A name that is not in `taken`: "a.txt" → "a (copy).txt" → "a (copy 2).txt". */
 function freeName(name, taken, word = 'copy') {
   if (!taken.has(name)) return name;
@@ -120,7 +136,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
   host.innerHTML = `
     <section class="fs">
       <header class="fs-top">
-        <button class="rs-icon" data-act="exit" title="Back to devices" aria-label="Back to devices">${ic('i-back')}</button>
+        <button class="iconbtn" data-act="exit" title="Back to devices" aria-label="Back to devices">${ic('i-back')}</button>
         <div class="fs-where">
           <span class="fs-dev">${esc(deviceName || deviceId)} · files</span>
           <nav class="fs-crumbs" aria-label="Path"></nav>
@@ -128,25 +144,25 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
       </header>
       <div class="fs-tools">
         <span class="fs-nav">
-          <button class="rs-icon" data-act="up" title="Up one folder (Backspace)" aria-label="Up one folder">${ic('i-up')}</button>
-          <button class="rs-icon" data-act="home" title="Home folder" aria-label="Home folder">${ic('i-house')}</button>
-          <button class="rs-icon" data-act="refresh" title="Refresh" aria-label="Refresh">${ic('i-refresh')}</button>
+          <button class="iconbtn" data-act="up" title="Up one folder (Backspace)" aria-label="Up one folder">${ic('i-up')}</button>
+          <button class="iconbtn" data-act="home" title="Home folder" aria-label="Home folder">${ic('i-house')}</button>
+          <button class="iconbtn" data-act="refresh" title="Refresh" aria-label="Refresh">${ic('i-refresh')}</button>
         </span>
         <label class="fs-search">
           ${ic('i-search')}
           <input class="input fs-search-input" type="search" placeholder="Filter" aria-label="Filter this folder" />
         </label>
         <span class="fs-make">
-          <button class="rs-chip fs-chip fs-sortbtn" data-act="sortmenu" aria-label="Sort">${ic('i-sort')}<span>Sort</span></button>
-          <button class="rs-chip fs-chip" data-act="mkdir" title="New folder" aria-label="New folder">${ic('i-folderAdd')}<span>New folder</span></button>
-          <button class="rs-chip fs-chip" data-act="upload-dir" title="Upload a folder" aria-label="Upload a folder">${ic('i-folderUp')}<span>Folder</span></button>
-          <button class="rs-chip fs-chip on" data-act="upload" title="Upload files" aria-label="Upload files">${ic('i-upload')}<span>Upload</span></button>
+          <button class="btn btn--ghost btn--sm fs-sortbtn" data-act="sortmenu" title="Sort" aria-label="Sort">${ic('i-sort')}<span class="fs-lbl">Sort</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="mkdir" title="New folder" aria-label="New folder">${ic('i-folderAdd')}<span class="fs-lbl">New folder</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="upload-dir" title="Upload a folder" aria-label="Upload a folder">${ic('i-folderUp')}<span class="fs-lbl">Upload folder</span></button>
+          <button class="btn btn--sm fs-upbtn" data-act="upload" title="Upload files" aria-label="Upload files">${ic('i-upload')}<span>Upload</span></button>
         </span>
       </div>
       <div class="fs-clipbar" hidden>
         <span class="fs-clip-txt"></span>
-        <button class="rs-chip fs-chip on" data-act="paste">${ic('i-paste')}<span>Paste here</span></button>
-        <button class="rs-icon" data-act="clip-cancel" title="Cancel" aria-label="Cancel move or copy">${ic('i-close')}</button>
+        <button class="btn btn--sm" data-act="paste">${ic('i-paste')}<span>Paste here</span></button>
+        <button class="iconbtn" data-act="clip-cancel" title="Cancel" aria-label="Cancel move or copy">${ic('i-close')}</button>
       </div>
       <div class="fs-listwrap">
         <div class="fs-row fs-listhead" role="row">
@@ -160,14 +176,14 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
         <div class="fs-drop" hidden><span>${ic('i-upload', 'ic ic--xl')}Drop to upload into this folder</span></div>
       </div>
       <div class="fs-selbar" hidden>
-        <button class="rs-icon" data-act="clear" title="Clear selection (Esc)" aria-label="Clear selection">${ic('i-close')}</button>
+        <button class="iconbtn" data-act="clear" title="Clear selection (Esc)" aria-label="Clear selection">${ic('i-close')}</button>
         <span class="fs-selcount"></span>
         <span class="fs-selacts">
-          <button class="fs-sa" data-act="download" title="Download">${ic('i-download')}<span>Download</span></button>
-          <button class="fs-sa" data-act="cut" title="Move to another folder">${ic('i-move')}<span>Move</span></button>
-          <button class="fs-sa" data-act="copy" title="Copy to another folder">${ic('i-copy')}<span>Copy</span></button>
-          <button class="fs-sa" data-act="rename" title="Rename (F2)">${ic('i-edit')}<span>Rename</span></button>
-          <button class="fs-sa fs-sa--warn" data-act="delete" title="Delete (Del)">${ic('i-trash')}<span>Delete</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="download" title="Download" aria-label="Download">${ic('i-download')}<span class="fs-lbl">Download</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="cut" title="Move to another folder" aria-label="Move">${ic('i-move')}<span class="fs-lbl">Move</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="copy" title="Copy to another folder" aria-label="Copy">${ic('i-copy')}<span class="fs-lbl">Copy</span></button>
+          <button class="btn btn--ghost btn--sm" data-act="rename" title="Rename (F2)" aria-label="Rename">${ic('i-edit')}<span class="fs-lbl">Rename</span></button>
+          <button class="btn btn--danger btn--sm" data-act="delete" title="Delete (Del)" aria-label="Delete">${ic('i-trash')}<span class="fs-lbl">Delete</span></button>
         </span>
       </div>
       <div class="fs-transfers" hidden>
@@ -176,7 +192,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
             ${ic('i-show')}<span class="fs-tr-title">Transfers</span><span class="fs-tr-sum"></span>
           </button>
           <span class="fs-bar fs-tr-total"><span class="fs-fill"></span></span>
-          <button class="rs-chip" data-act="tr-clear">Clear done</button>
+          <button class="btn btn--ghost btn--sm" data-act="tr-clear">Clear done</button>
         </div>
         <div class="fs-tr-list"></div>
       </div>
@@ -712,7 +728,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
            data-name="${esc(e.name)}" data-type="${e.type}" role="row" aria-selected="${on}" title="${esc(e.longname || e.name)}">
         <span class="fs-check"><input type="checkbox" tabindex="-1" aria-label="Select ${esc(e.name)}"${on ? ' checked' : ''} /></span>
         <span class="fs-name">
-          <span class="fs-ic" aria-hidden="true">${ic(isDir ? 'i-folder' : 'i-file')}</span>
+          <span class="fs-ic" aria-hidden="true">${ic(iconOf(e))}</span>
           <span class="fs-name-col">
             <span class="fs-name-text">${esc(e.name)}${e.type === 'link' ? ' <span class="fs-link">↪</span>' : ''}</span>
             <span class="fs-sub">${esc(sub)}</span>
@@ -741,7 +757,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
     if (failed && cwd == null) {
       listEl.innerHTML = `<div class="empty fs-empty">${ic('i-warn', 'ic ic--xl')}
         <b>Cannot list files</b><span>${esc(failed)}</span>
-        <button class="rs-chip" data-act="refresh">Try again</button></div>`;
+        <button class="btn btn--ghost btn--sm" data-act="refresh">Try again</button></div>`;
       countEl.textContent = '';
       paintSelection();
       return;
@@ -792,7 +808,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
     const dl = $('[data-act="download"]');
     const asTar = n > 1 || dirs > 0;
     dl.title = asTar ? 'Download as one .tar' : 'Download';
-    dl.querySelector('span').innerHTML = `Download${asTar ? '<span class="fs-tarword"> .tar</span>' : ''}`;
+    dl.querySelector('.fs-lbl').textContent = asTar ? 'Download .tar' : 'Download';
   }
 
   function paintClip() {
@@ -864,9 +880,9 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
         el.dataset.state = t.state;
         el.className = `fs-tr fs-tr--${t.state}`;
         el.querySelector('.fs-tr-btns').innerHTML = t.state === 'queued' || t.state === 'running'
-          ? `<button class="fs-ra" data-cancel="${t.id}" title="Cancel" aria-label="Cancel ${esc(t.name)}">${ic('i-close')}</button>`
+          ? `<button class="iconbtn" data-cancel="${t.id}" title="Cancel" aria-label="Cancel ${esc(t.name)}">${ic('i-close')}</button>`
           : t.state === 'error' || t.state === 'cancelled'
-            ? `<button class="fs-ra" data-retry="${t.id}" title="Try again" aria-label="Retry ${esc(t.name)}">${ic('i-refresh')}</button>`
+            ? `<button class="iconbtn" data-retry="${t.id}" title="Try again" aria-label="Retry ${esc(t.name)}">${ic('i-refresh')}</button>`
             : '';
       }
       el.querySelector('.fs-tr-state').textContent = label;
@@ -1096,7 +1112,7 @@ export function startFiles({ host, ctx, deviceId, deviceName, onExit }) {
   };
   document.addEventListener('keydown', onKey);
 
-  const onResize = () => closeMenu();
+  const onResize = () => { closeMenu(); crumbEl.scrollLeft = crumbEl.scrollWidth; };
   window.addEventListener('resize', onResize);
   listEl.addEventListener('scroll', closeMenu, { passive: true });
 
