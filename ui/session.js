@@ -155,6 +155,11 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   let reconnectTimer = null;
   let userSwitchedDevice = false;  // prevents the auto-reconnect after a manual switch
   let rdpGeneration = 0;           // invalidates stale RDP death handlers after reconnects
+  /* Set by teardown. connect() starts with an await, so the user can leave the
+     device while a token fetch is still in flight; without this the answer
+     arrives, opens a socket and starts a session nobody is looking at — and
+     re-arms the backoff timer teardown just cleared. */
+  let dead = false;
 
   /* Retrying is for a connection that was interrupted. It is NOT a way to fix
      a host that is locked, asleep, or refusing the protocol — those fail the
@@ -175,6 +180,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   }
 
   function scheduleReconnect(why) {
+    if (dead) return;
     if (why) lastReason = why;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (userSwitchedDevice) { userSwitchedDevice = false; return; }
@@ -318,6 +324,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   }
 
   async function connect() {
+    if (dead) return;
     if (!activeDevice) return;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     setStatus(`connecting to ${activeDevice.name}…`);
@@ -473,6 +480,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       scheduleReconnect(`token fetch failed: ${e.message}`);
       return;
     }
+    // The fetch above is the one await before `client` exists. Whoever exited
+    // while it was in flight has already run teardown, which cannot disconnect
+    // a client that has not been built yet — so do not build one.
+    if (dead) return;
 
     const tunnel = new Guacamole.WebSocketTunnel(`${wsProto}//${location.host}${ctx.base}/guac`);
     const gc = new Guacamole.Client(tunnel);
@@ -1049,7 +1060,12 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     if (tpAwaitingDragTimer) { clearTimeout(tpAwaitingDragTimer); tpAwaitingDragTimer = null; }
   }
 
-  document.addEventListener('touchstart', (e) => {
+  // Every document/window listener in here is NAMED, so teardown can take it
+  // off again. An anonymous one cannot be removed, and these are on `document`
+  // with capture — they outlive the session, and touchstart calls
+  // preventDefault() on everything it sees, so an orphaned copy stops the whole
+  // app scrolling the moment you leave a device.
+  const onTouchStart = (e) => {
     if (isHudInteractive(e.target)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -1094,9 +1110,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         if (navigator.vibrate) navigator.vibrate(15);  // haptic confirmation
       }
     }, HOLD_RIGHT_MS);
-  }, { passive: false, capture: true });
+  };
+  document.addEventListener('touchstart', onTouchStart, { passive: false, capture: true });
 
-  document.addEventListener('touchmove', (e) => {
+  const onTouchMove = (e) => {
     if (tpState === 'idle' || isHudInteractive(e.target)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -1205,9 +1222,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     if (tpState === 'dragging_left')  mask = BTN_LEFT;
     if (tpState === 'holding_right')  mask = BTN_RIGHT;
     sendPointer(mask);
-  }, { passive: false, capture: true });
+  };
+  document.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
 
-  document.addEventListener('touchend', (e) => {
+  const onTouchEnd = (e) => {
     if (tpState === 'idle') return;
     if (!isHudInteractive(e.target)) {
       e.preventDefault();
@@ -1252,9 +1270,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
         tpTwoFingerMode = null;
         tpState = 'idle';
     }
-  }, { passive: false, capture: true });
+  };
+  document.addEventListener('touchend', onTouchEnd, { passive: false, capture: true });
 
-  document.addEventListener('touchcancel', () => {
+  const onTouchCancel = () => {
     // Browser yanked the touch (system gesture, multitask switch, etc.).
     // Release anything we might be holding and reset cleanly.
     clearHoldRightTimer();
@@ -1264,7 +1283,8 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     }
     tpTwoFingerMode = null;
     tpState = 'idle';
-  }, { capture: true });
+  };
+  document.addEventListener('touchcancel', onTouchCancel, { capture: true });
 
   // ── desktop mouse and keyboard ──────────────────────────────────────
   // The trackpad above is for fingers. A real mouse is ABSOLUTE: the pointer
@@ -1581,15 +1601,17 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     reveal.classList.remove('show');
   };
 
-  window.addEventListener('resize', () => {
+  const onViewportResize = () => {
     applyFitOrFocus();
-  });
+  };
+  window.addEventListener('resize', onViewportResize);
 
-  document.addEventListener('visibilitychange', () => {
+  const onVisibilityChange = () => {
     if (!document.hidden && client) {
       loadMonitors();
     }
-  });
+  };
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   // ── mobile on-screen keyboard handling ────────────────────────────────
   // The keyboard covers the bottom of the screen. The old handling shrank the
@@ -1598,6 +1620,7 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   // unrelated. Now the zoom stays exactly where it was and the view only slides
   // up - as far as needed and no further - to keep the pointer, which is what
   // you were looking at, clear of the keys. Closing the keyboard slides it back.
+  let vvOff = null;
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let closedHeight = vv.height;
@@ -1608,6 +1631,10 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
     };
     vv.addEventListener('resize', onVvChange);
     vv.addEventListener('scroll', onVvChange);
+    vvOff = () => {
+      vv.removeEventListener('resize', onVvChange);
+      vv.removeEventListener('scroll', onVvChange);
+    };
   }
 
   /**
@@ -1641,18 +1668,36 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
   bootSession(deviceId);
 
   return function teardown() {
+    dead = true;                     // a connect still in flight must not land
     rdpGeneration++;                 // stale close handlers must not reconnect
     releaseMouse();
     releaseKeys();
+    // Everything startSession put on document/window has to come off here, in
+    // the same capture state it went on with. These handlers are what make the
+    // session feel like the screen; left behind they make the REST of the app
+    // feel like the screen — touchstart preventDefault()s every touch it sees,
+    // so a session you have exited keeps eating the page's scrolling.
+    document.removeEventListener('touchstart', onTouchStart, { capture: true });
+    document.removeEventListener('touchmove', onTouchMove, { capture: true });
+    document.removeEventListener('touchend', onTouchEnd, { capture: true });
+    document.removeEventListener('touchcancel', onTouchCancel, { capture: true });
     document.removeEventListener('contextmenu', onContextMenu);
     document.removeEventListener('keydown', onKeyDown, true);
     document.removeEventListener('keyup', onKeyUp, true);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('resize', onViewportResize);
     window.removeEventListener('blur', releaseMouse);
     window.removeEventListener('blur', releaseKeys);
+    vvOff?.();
     try { client?.disconnect(); } catch { /* already gone */ }
+    client = null;                    // visibilitychange must not call monitors
+    rfb = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (pictureTimer) { clearTimeout(pictureTimer); pictureTimer = null; }
     clearHoldRightTimer();
     clearAwaitingDragTimer();
+    tpTwoFingerMode = null;
+    tpState = 'idle';                 // or the next session inherits a gesture
     document.getElementById('rd-kbd-helper')?.remove();
     document.body.classList.remove('keyboard-open');
   };
