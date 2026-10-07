@@ -50,10 +50,10 @@
   align-self: center;
   background: var(--dim);
 }
-.rd-status[data-kind="ok"]::before   { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-.rd-status[data-kind="info"]::before { background: var(--info); box-shadow: 0 0 8px var(--info); animation: pulse 1.2s ease-in-out infinite; }
-.rd-status[data-kind="warn"]::before { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-.rd-status[data-kind="err"]::before  { background: var(--err); box-shadow: 0 0 8px var(--err); }
+.rd-status[data-kind="ok"]::before   { background: var(--accent); }
+.rd-status[data-kind="info"]::before { background: var(--info); animation: pulse 1.2s ease-in-out infinite; }
+.rd-status[data-kind="warn"]::before { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.rd-status[data-kind="err"]::before  { background: var(--err); }
 .rd-status[data-kind="ok"]   .rd-state-label { color: var(--accent); }
 .rd-status[data-kind="warn"] .rd-state-label { color: var(--warn); }
 .rd-status[data-kind="err"]  .rd-state-label { color: var(--err); }
@@ -322,7 +322,7 @@
   font-family: var(--mono); font-size: 0.6rem; color: var(--dim); white-space: nowrap;
 }
 .rd-act-dot { width: 6px; height: 6px; flex: none; background: var(--dim); }
-.rd-act--on .rd-act-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.rd-act--on .rd-act-dot { background: var(--ok); }
 .rd-act--wait .rd-act-dot { background: var(--warn); }
 .rd-act--off { color: var(--warn); }
 .rd-act--off .rd-act-dot { background: var(--err); }

@@ -50,11 +50,13 @@ function loadXterm(base) {
 function themeFromCss() {
   const v = (n, dflt) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || dflt;
   return {
-    background: v('--bg-1', '#0b0d10'),
-    foreground: v('--ink', '#e6e8ea'),
-    cursor: v('--accent', '#7cc4ff'),
-    cursorAccent: v('--bg-1', '#0b0d10'),
-    selectionBackground: v('--accent-08', 'rgba(124,196,255,0.22)'),
+    background: v('--bg-1', '#000000'),
+    foreground: v('--ink', '#ffffff'),
+    cursor: v('--accent', '#ffffff'),
+    cursorAccent: v('--bg-1', '#000000'),
+    // Not --accent-08: on a white accent that is an 8% wash and a selection
+    // nobody can see. A fixed grey that reads on the black ground.
+    selectionBackground: 'rgba(255,255,255,0.28)',
   };
 }
 
