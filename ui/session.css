@@ -222,3 +222,9 @@ video.rd-agent-media { object-fit: fill; pointer-events: none; }
   .rs-blocker-actions { flex-direction: column; }
   .rs-blocker-btn { width: 100%; }
 }
+
+/* The main display among the monitor chips: a small square after the number. */
+.rs-chip.rd-primary::after {
+  content: ''; display: inline-block; width: 4px; height: 4px; margin-left: 5px;
+  vertical-align: 0.15em; background: currentColor;
+}

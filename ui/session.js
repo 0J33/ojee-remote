@@ -714,7 +714,9 @@ export function startSession({ host, ctx: context, deviceId, onExit }) {
       const b = document.createElement('button');
       b.className = 'rs-chip' + (focusedMonitor && focusedMonitor.name === m.name ? ' on' : '')
         + (m.capturable === false ? ' rd-unshared' : '');
-      b.textContent = m.primary ? `${i + 1}★` : String(i + 1);
+      b.textContent = String(i + 1);
+      // The main display is marked by a small square, not a star glyph.
+      if (m.primary) { b.classList.add('rd-primary'); b.setAttribute('aria-label', `Monitor ${i + 1}, main display`); }
       b.title = `${m.name}  ${m.w}×${m.h}  @${m.x},${m.y}`
         + (m.capturable === false ? '  - not shared: re-share on the host to see it' : '');
       // An unshared monitor is still part of the desk - the pointer can go
